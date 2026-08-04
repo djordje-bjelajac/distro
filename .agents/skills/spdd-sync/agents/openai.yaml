@@ -1,0 +1,4 @@
+interface:
+  display_name: "SPDD Sync"
+  short_description: "Reconcile a REASONS canvas with its code"
+  default_prompt: "Use $spdd-sync to reconcile the referenced canvas with the implementation."

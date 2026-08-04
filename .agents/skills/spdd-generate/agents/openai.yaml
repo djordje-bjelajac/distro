@@ -1,0 +1,4 @@
+interface:
+  display_name: "SPDD Generate"
+  short_description: "Implement an approved REASONS canvas safely"
+  default_prompt: "Use $spdd-generate to implement the referenced REASONS canvas."
