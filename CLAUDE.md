@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Current state
 
-The repository contains only agent scaffolding — `AGENTS.md`, `.codex/agents/`, and `.agents/skills/`. There is no Cargo workspace, `src/`, `tests/`, or `docs/` yet. The structure below is the **target** layout to create as code lands, not something already on disk. Verify a path exists before assuming it.
+The repository contains only agent scaffolding — `AGENTS.md`, `.codex/agents/`, `.agents/skills/`, and the `.claude/` mirror of both. There is no Cargo workspace, `src/`, `tests/`, or `docs/` yet. The structure below is the **target** layout to create as code lands, not something already on disk. Verify a path exists before assuming it.
 
 `AGENTS.md` is the authoritative contributor guide. Keep this file consistent with it; when they conflict, `AGENTS.md` wins.
 
@@ -17,6 +17,9 @@ cargo test -p <crate>                                    # one bounded context /
 cargo test -p <crate> <test_name>                        # single test
 cargo fmt --all -- --check                               # formatting gate
 cargo clippy --workspace --all-targets -- -D warnings    # lint gate (warnings are errors)
+
+scripts/sync-claude-agents.py                            # regenerate .claude/agents from .codex/agents
+scripts/sync-claude-agents.py --check                    # fail if the two have drifted
 ```
 
 Run the narrowest relevant check after each change; run all four before declaring work complete. Never report an unavailable check as passing.
@@ -51,7 +54,7 @@ Red-green-refactor. Co-locate `module_test.rs` beside `module.rs` and register i
 
 ## SPDD workflow
 
-Non-trivial work flows through the skills in `.agents/skills/`, which are invoked by name (e.g. `$spdd-analysis`):
+Non-trivial work flows through the skills in `.agents/skills/`, invoked as `$spdd-analysis` in Codex and `/spdd-analysis` in Claude Code (`.claude/skills/` symlinks to the same `SKILL.md` files, so edit only the originals):
 
 `spdd-analysis` (requirements → context, ownership, risks; no code) → `spdd-reasons-canvas` (→ a REASONS canvas: Requirements, Entities, Approach, Structure, Operations, Norms, Safeguards, Agents; saved under `docs/specs/` or `spdd/prompt/`) → `spdd-generate` (execute the canvas's ordered operations with TDD and full verification).
 
@@ -61,7 +64,7 @@ An approved canvas is the implementation source of truth, subordinate to `AGENTS
 
 ## Specialist agents
 
-`.codex/agents/*.toml` define narrow specialists, each owning a layer. The ownership map is the practical expression of the dependency rules above — route work by it, and delegate only bounded, independent operations, reconciling all results before verification (max 6 concurrent threads per session, per `.codex/config.toml`):
+`.codex/agents/*.toml` define narrow specialists, each owning a layer. The `.toml` files are the source of truth: `.claude/agents/*.md` is generated from them by `scripts/sync-claude-agents.py`, so edit the `.toml` and regenerate rather than editing the Markdown. The ownership map is the practical expression of the dependency rules above — route work by it, and delegate only bounded, independent operations, reconciling all results before verification (max 6 concurrent threads per session, per `.codex/config.toml`):
 
 | Agent | Owns |
 | --- | --- |
