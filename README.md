@@ -71,6 +71,18 @@ Three paths, tried in that order, and the first that answers wins:
    protocol version, and an expiry (24 h by default), and it is refused if it is
    stale or speaks a different major version.
 
+```mermaid
+flowchart TD
+    L(["launch"]) --> C{"cached peers<br/>from last session?"}
+    C -->|"one answers"| J(["connected"])
+    C -->|"nothing"| M{"mDNS peer<br/>on the local link?"}
+    M -->|"one answers"| J
+    M -->|"nothing"| T{"join ticket<br/>supplied?"}
+    T -->|"its addresses answer"| J
+    T -->|"nothing"| I(["isolated<br/>each rung reports why"])
+    J --> K["Kademlia takes over<br/>for peers not yet met"]
+```
+
 The honest cost of having no servers: **the first-ever internet join of a fresh
 install needs one pasted ticket.** Every alternative — a hardcoded bootstrap
 list, a DNS seed, a rendezvous point — is a host somebody operates and pays for,
@@ -105,6 +117,27 @@ asserts the service is offered to strangers rather than merely compiled in. If
 you are relayed today, someone else's laptop is carrying your traffic; when your
 peer is the reachable one, you carry theirs. The relay cannot read what it
 carries: the circuit runs Noise end to end between the two real endpoints.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant A as Alice at home
+    participant R as A reachable peer
+    participant B as Bob at home
+
+    A->>R: AutoNAT, can you dial me back?
+    R-->>A: no, you are not reachable
+    A->>R: reserve a relay slot
+    B->>R: open a circuit to Alice
+    R->>A: circuit opened
+    Note over A,B: Noise runs end to end.<br/>The relay forwards ciphertext<br/>it cannot read.
+    A-->>B: messages flow, relayed
+    par DCUtR hole punch
+        A->>B: simultaneous dial
+        B->>A: simultaneous dial
+    end
+    Note over A,B: Direct link established.<br/>The relay is out of the path<br/>and stops paying for the traffic.
+```
 
 **DCUtR** then tries to *escape* the relay. Both peers dial each other
 simultaneously through the coordinated timing the relayed connection gives them,
@@ -143,6 +176,23 @@ confidential**: every member can read them. That is what a network-wide channel
 is. The topic name doubles as a network identifier — peers on different topics
 are simply on different networks.
 
+```mermaid
+flowchart LR
+    subgraph BC ["broadcast — gossip floods outward, nobody is a hub"]
+        direction LR
+        y1(("you")) --> p1(("peer"))
+        y1 --> p2(("peer"))
+        p1 --> p3(("peer"))
+        p2 --> p4(("peer"))
+        p3 --> p5(("peer"))
+    end
+    subgraph DM ["direct — one session, and an ack that moves the mark"]
+        direction LR
+        y2(("you")) -->|"signed message"| q1(("that peer"))
+        q1 -.->|"acknowledgement"| y2
+    end
+```
+
 **Direct messages** (`/distro/direct/1.0.0`) go over the authenticated session to
 that one peer, as a request/response exchange, so the acknowledgement is what
 moves a message from `pending` (`·`) to `delivered` (`✓`). If the transport
@@ -174,6 +224,19 @@ you do not sit staring at nothing — is **abandoned explicitly**: the log skips
 past it and the conversation shows *"3 messages from 2876 ce56 were never
 received"* in the place where they belong.
 
+```mermaid
+flowchart TD
+    R["a message from some author arrives"] --> D{"already applied?"}
+    D -->|"yes"| X(["ignored — applied exactly once"])
+    D -->|"no"| N{"is it the next one<br/>in that author's order?"}
+    N -->|"yes"| Y(["shown, and anything buffered<br/>behind it drains in order"])
+    N -->|"no, it runs ahead"| BUF["buffered, gap left open<br/>up to 64 messages per author"]
+    BUF --> W{"does the gap fill<br/>within 2 seconds?"}
+    W -->|"yes"| Y
+    W -->|"no, it never can"| AB(["gap abandoned and named in place<br/>3 messages were never received"])
+    AB --> Y
+```
+
 Nothing is lost silently in either direction. A message that turns up after its
 gap closed is reported as too late, not quietly discarded, and never reordered
 into history behind your scroll position. Duplicates — which gossip also produces
@@ -194,6 +257,19 @@ seconds**, and any envelope from a peer is evidence it is alive. A peer is
 beyond that. Pulling the plug on a machine therefore looks exactly like it
 should: the peer stops producing evidence, and everyone independently concludes
 it is gone within the window. No message needs to be delivered for that to work.
+
+```mermaid
+stateDiagram-v2
+    direction LR
+    [*] --> online: first evidence
+    online --> stale: 30s with no evidence
+    stale --> offline: 60s with no evidence
+    stale --> online: any envelope or heartbeat
+    offline --> online: any envelope or heartbeat
+```
+
+Nothing above is a message anyone sends *about* a third peer — each peer reaches
+these conclusions on its own, from what it has and has not heard.
 
 ### Versions, and why peers upgrade independently
 
