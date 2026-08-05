@@ -55,6 +55,17 @@ OPTIONS
                         found again after a restart — pin a port for that, and
                         for a port forwarded through a NAT.
                         e.g. --listen /ip4/0.0.0.0/udp/4001/quic-v1
+    --external-address <ADDR>
+                        A multiaddress the world reaches this peer at,
+                        repeatable. Not a bootstrap list either. The value is
+                        this peer's own address, not a host to contact: it is
+                        advertised so other peers can reach this one, and it is
+                        never dialled. Use it when you have forwarded a port
+                        and no other peer has observed the address for you yet.
+                        Saying an address works does not make it work: it is
+                        still probed, and one that does not answer is reported
+                        unreachable rather than believed.
+                        e.g. --external-address /ip4/203.0.113.7/tcp/4001
     --no-lan            Do not discover peers over mDNS on the local link.
     --print-identity    Print this profile's identity and exit. Starts no
                         network and opens no terminal.

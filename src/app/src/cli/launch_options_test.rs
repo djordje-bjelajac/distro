@@ -94,7 +94,18 @@ fn there_is_no_role_flag_and_no_way_to_add_one_quietly() {
     // S1 rides along: `--bootstrap`/`--bootstrap-node`/`--relay-address` would
     // each be a hardcoded host by another route (D1 exists precisely because
     // there is no such list). `--listen` is not on this list and must not be —
-    // it names addresses this peer *binds*, never hosts it contacts.
+    // it names addresses this peer *binds*, never hosts it contacts. Nor is
+    // `--external-address`, which names an address this peer is *reached at*
+    // and is only ever advertised.
+    //
+    // Those two are the reason the last three names are here. Both take a
+    // multiaddress on the command line, which is the exact shape of the thing
+    // S1 forbids, so the neighbouring names are one careless rename away from
+    // being a bootstrap list wearing this option's clothes: an
+    // `--external-peer` or an `--external-host` reads like a companion to
+    // `--external-address` and would be a host to contact, and an
+    // `--advertise-peer` reads like a companion to advertising our own address
+    // and would be someone else's. None of them may ever parse.
     for role_flag in [
         "--server",
         "--client",
@@ -112,6 +123,9 @@ fn there_is_no_role_flag_and_no_way_to_add_one_quietly() {
         "--mode",
         "--metrics",
         "--telemetry",
+        "--external-peer",
+        "--external-host",
+        "--advertise-peer",
     ] {
         assert_eq!(
             LaunchOptions::parse([role_flag]),
@@ -124,7 +138,7 @@ fn there_is_no_role_flag_and_no_way_to_add_one_quietly() {
 }
 
 #[test]
-fn the_whole_option_set_is_six_options_and_two_requests() {
+fn the_whole_option_set_is_seven_options_and_two_requests() {
     // The list above only catches names somebody thought of. This catches the
     // rest: if an option is added, this fails until whoever added it has looked
     // at the AC4 list and decided the new one is not a role. Kept as names
@@ -134,6 +148,7 @@ fn the_whole_option_set_is_six_options_and_two_requests() {
         "--ticket",
         "--topic",
         "--listen",
+        "--external-address",
         "--no-lan",
         "--print-identity",
     ];
@@ -156,11 +171,13 @@ fn the_whole_option_set_is_six_options_and_two_requests() {
             join_ticket: None,
             broadcast_topic: None,
             listen_addresses: Vec::new(),
+            external_addresses: Vec::new(),
             lan_discovery: true,
             print_identity: false,
         },
-        "a launch with no arguments must still be fully described by these six \
-         fields — a seventh means a new option, which needs the AC4 check above"
+        "a launch with no arguments must still be fully described by these \
+         seven fields — an eighth means a new option, which needs the AC4 \
+         check above"
     );
 }
 
@@ -208,5 +225,97 @@ fn a_listen_option_missing_its_value_is_refused() {
     assert_eq!(
         LaunchOptions::parse(["--listen"]),
         Err(ArgumentError::MissingValue("--listen"))
+    );
+}
+
+#[test]
+fn an_external_address_can_be_asserted() {
+    // P3-1. The address the world reaches *this* peer at, asserted by whoever
+    // forwarded the port — never a host to contact (S1).
+    assert_eq!(
+        run(&["--external-address", "/ip4/203.0.113.7/udp/4001/quic-v1"]).external_addresses,
+        vec!["/ip4/203.0.113.7/udp/4001/quic-v1".to_owned()]
+    );
+}
+
+#[test]
+fn external_addresses_accumulate_in_order() {
+    // A dual-stack host is reached at both an IPv4 and an IPv6 address, so the
+    // option repeats rather than taking a delimited list, exactly as `--listen`
+    // does. Order is preserved because it is the order they will be advertised
+    // in, and a set that reordered them would make a diagnostic harder to read
+    // for no gain.
+    let options = run(&[
+        "--external-address",
+        "/ip4/203.0.113.7/udp/4001/quic-v1",
+        "--external-address",
+        "/ip6/2001:db8::1/tcp/4001",
+    ]);
+
+    assert_eq!(
+        options.external_addresses,
+        vec![
+            "/ip4/203.0.113.7/udp/4001/quic-v1".to_owned(),
+            "/ip6/2001:db8::1/tcp/4001".to_owned(),
+        ]
+    );
+}
+
+#[test]
+fn no_external_address_is_asserted_by_default() {
+    // The ordinary case: nothing is asserted, and an address becomes advertised
+    // only once a peer has observed it or a probe has confirmed it.
+    assert!(run(&[]).external_addresses.is_empty());
+}
+
+#[test]
+fn a_malformed_external_address_is_refused_at_startup_and_named() {
+    // P3-3/S4. This is the option someone reaches for when nothing else has
+    // worked, so a value that quietly did nothing would look exactly like the
+    // problem it was typed to solve. Each of these is refused, and the refusal
+    // repeats the value so the typo is visible without re-reading the shell
+    // history.
+    for value in [
+        "",
+        "not-a-multiaddress",
+        "203.0.113.7:4001",
+        "/ip4/999.1.1.1/tcp/4001",
+        "/ip4/203.0.113.7/tcp/",
+    ] {
+        let error = LaunchOptions::parse(["--external-address", value])
+            .expect_err("a malformed multiaddress must be refused, not stored");
+
+        assert_eq!(
+            error,
+            ArgumentError::MalformedAddress {
+                flag: "--external-address",
+                value: value.to_owned(),
+            },
+            "`{value}` was not refused as a malformed multiaddress"
+        );
+        assert!(
+            error.to_string().contains(&format!("{value:?}")),
+            "the refusal must name the offending value, and said: {error}"
+        );
+    }
+}
+
+#[test]
+fn an_external_address_is_stored_as_the_value_that_was_validated() {
+    // Whitespace is trimmed before the address is checked, so it must be
+    // trimmed before it is kept too: validating one string and advertising
+    // another would move the failure to a place nobody is looking, which is
+    // the silent no-op P3-3 exists to prevent.
+    assert_eq!(
+        run(&["--external-address", "  /ip4/203.0.113.7/tcp/4001  "]).external_addresses,
+        vec!["/ip4/203.0.113.7/tcp/4001".to_owned()]
+    );
+}
+
+#[test]
+fn an_external_address_option_missing_its_value_is_refused() {
+    assert_eq!(
+        LaunchOptions::parse(["--external-address"]),
+        Err(ArgumentError::MissingValue("--external-address"))
     );
 }

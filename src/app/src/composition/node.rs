@@ -51,7 +51,11 @@ use crate::composition::{
 /// 4. **Start the network.** Nothing is listening yet: that is
 ///    `PeerTransportPort::listen`, which `membership` calls when it decides to
 ///    join. Starting a swarm and joining a network are two different decisions
-///    and only the second one is the user's.
+///    and only the second one is the user's. Any address the operator asserted
+///    with `--external-address` is advertised here, and a malformed or
+///    non-global one refuses the launch rather than being quietly dropped —
+///    the whole option exists for the peer that has nobody to ask, so it must
+///    not fail silently.
 /// 5. **Build the contexts** over the swarm's three port adapters, the five
 ///    stores, the one clock, and the root's own adapters.
 ///
@@ -156,6 +160,12 @@ impl Node {
         let gaps = Arc::new(GapLedger::new());
         let notices = Arc::new(NoticeFeed::new());
         let diagnostics = Arc::new(Diagnostics::default());
+        // What this launch was *asked* to advertise (external-address canvas
+        // D6). Whether any of it took hold arrives later and separately, as
+        // `NetworkEvent::ExternalAddressConfirmed` reaches the event router —
+        // two facts from two sources, because the failure this option is
+        // reached for looks identical to success unless they are kept apart.
+        diagnostics.record_supplied_external_addresses(&settings.network.external_addresses);
         let discovery =
             Arc::new(network.peer_discovery()) as Arc<dyn PeerDiscoveryPort + Send + Sync>;
 

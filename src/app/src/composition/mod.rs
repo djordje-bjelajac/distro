@@ -37,6 +37,8 @@ mod delivery_index;
 #[cfg(test)]
 mod delivery_index_test;
 mod diagnostics;
+#[cfg(test)]
+mod diagnostics_test;
 mod gap_ledger;
 #[cfg(test)]
 mod gap_ledger_test;

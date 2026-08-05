@@ -10,6 +10,7 @@ distro --print-identity               # report this profile's identity and exit
 distro --profile ~/.distro-b          # a second instance on the same machine
 distro --ticket distro-join-1.…       # first internet join of a fresh install
 distro --listen /ip4/0.0.0.0/udp/4001/quic-v1   # bind a known port
+distro --external-address /ip4/203.0.113.7/udp/4001/quic-v1   # announce a forwarded port
 ```
 
 ## What you should know before joining
@@ -34,6 +35,58 @@ and no amount of retrying fixes it — a direct message fails with
 **History is not kept.** Conversations live in memory and are gone when the
 process exits. The identity, the trust records, the peer cache and the outbound
 sequence counter persist in the profile directory.
+
+## Being reachable from outside
+
+An instance normally learns its own public address rather than being told it:
+either several peers independently report seeing the same one, or an AutoNAT
+probe dials it back successfully. Both need a peer that is already there. A home
+server that is the *first* instance on its network has neither, so a forwarded
+port sits working while the peer waits for somebody to notice it.
+
+`--external-address <MULTIADDR>` breaks that deadlock. It is repeatable, and
+each value is advertised from startup — in announcements, in DHT records, and in
+any join ticket minted afterwards:
+
+```bash
+./target/debug/distro \
+    --listen /ip4/0.0.0.0/udp/4001/quic-v1 \
+    --listen /ip4/0.0.0.0/tcp/4001 \
+    --external-address /ip4/203.0.113.7/udp/4001/quic-v1 \
+    --external-address /ip4/203.0.113.7/tcp/4001
+```
+
+Pin the ports with `--listen` as well, or the OS picks one and the address you
+asserted points at nothing.
+
+**It is this peer's own address, and it is never dialled.** The option is the
+same shape as the bootstrap list this project does not have — a multiaddress on
+the command line — and unrelated to it. Nothing passes the value to a dial, to
+the peer cache, or to the DHT as somebody else's address; it is advertised so
+that other peers can reach *this* one, and that is all it does.
+
+**Asserting an address does not make it work.** It is the weakest of the three
+sources, not the strongest: observation and probing carry on exactly as before,
+and if a probe finds the asserted address does not answer, the status line says
+`unreachable`. You are told your claim was wrong rather than reassured it was
+right.
+
+**A malformed value refuses the launch**, naming the value, and so does a
+non-global one — `192.168.x.x`, `10.x.x.x`, a loopback or link-local address,
+or anything behind `/p2p-circuit`. The refusal for a private address says that
+mDNS already covers the local network, because someone typing their LAN address
+is usually reaching for an option they do not need.
+
+The `d` overlay reports the two facts separately:
+
+| row | what it means |
+| --- | --- |
+| `external addresses supplied` | how many `--external-address` values this launch was given |
+| `external addresses in effect` | how many of them the network confirmed and is advertising |
+
+`1` and `0` is the interesting case: the flag was set and did not take. They are
+two rows because they come from two places — the first from the command line,
+the second from the network — and neither can be inferred from the other.
 
 ## The profile directory
 
@@ -89,7 +142,7 @@ as set.
 | `g` | generate a join ticket to hand out |
 | `p` | paste a join ticket and join with it |
 | `r` / `l` | rejoin / leave the network |
-| `d` | local diagnostic counters, and which profile this instance is on |
+| `d` | local diagnostic counters, whether an asserted address took effect, and which profile this instance is on |
 | `?` | help |
 | `q` or `Ctrl+C` | quit |
 

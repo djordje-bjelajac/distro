@@ -39,10 +39,17 @@ impl Peer {
     /// developer's real network, and it needs no LAN rung anyway — the dial is
     /// explicit.
     fn start(secret: [u8; 32]) -> Result<Self, NetworkStartError> {
+        Self::start_with(secret, &NetworkConfig::loopback())
+    }
+
+    /// The same peer, on a configuration the caller chose — the only reason
+    /// being the external-address override, which is a launch-time fact and
+    /// therefore cannot be applied to a peer that is already running.
+    fn start_with(secret: [u8; 32], config: &NetworkConfig) -> Result<Self, NetworkStartError> {
         let mut secret = secret;
         let identity = NetworkIdentity::from_ed25519_secret_key(&mut secret)
             .expect("RFC 8032 vector is a valid secret key");
-        let runtime = NetworkRuntime::start(&identity, &NetworkConfig::loopback())?;
+        let runtime = NetworkRuntime::start(&identity, config)?;
 
         Ok(Self {
             transport: runtime.peer_transport(),
@@ -125,6 +132,15 @@ fn envelope(author: PeerId, kind: PayloadKind, body: &[u8]) -> Envelope {
 macro_rules! peer_or_skip {
     ($secret:expr) => {
         match Peer::start($secret) {
+            Ok(peer) => peer,
+            Err(error) => {
+                crate::required_network::skip(&error);
+                return;
+            }
+        }
+    };
+    ($secret:expr, $config:expr) => {
+        match Peer::start_with($secret, $config) {
             Ok(peer) => peer,
             Err(error) => {
                 crate::required_network::skip(&error);
@@ -440,6 +456,165 @@ fn observing_peers_on_an_empty_network_is_success_and_not_an_error() {
     assert_eq!(alice.discovery.observe_peers(), Ok(Vec::new()));
 
     alice.runtime.shutdown();
+}
+
+// --------------------------- an asserted external address (canvas `0008`)
+
+/// The addresses these tests assert — an IPv4 and an IPv6 one, because a
+/// dual-stack host that forwarded a port has both and a launch that applied
+/// only the first would silently drop half of what the operator said.
+///
+/// RFC 5737 and RFC 3849 documentation space, so a join ticket printed by a
+/// failing run names nobody's real machine.
+const ASSERTED: [&str; 2] = ["/ip4/203.0.113.7/tcp/4001", "/ip6/2001:db8::7/tcp/4001"];
+
+/// A loopback configuration that also asserts external addresses, which is the
+/// whole of what `--external-address` does to a peer's launch.
+fn asserting(addresses: &[&str]) -> NetworkConfig {
+    NetworkConfig {
+        external_addresses: addresses.iter().copied().map(str::to_owned).collect(),
+        ..NetworkConfig::loopback()
+    }
+}
+
+#[test]
+fn a_supplied_external_address_appears_in_a_join_ticket_minted_afterwards() {
+    // **P3-4, and the reason the whole piece exists.** A peer that forwarded a
+    // port can hand a stranger a ticket that names the address the world
+    // reaches it at — without waiting for a second peer to observe it or an
+    // AutoNAT server to probe it, neither of which the first instance on a
+    // network has.
+    //
+    // What this proves is that the assertion travels the real path: through
+    // startup, into the driver's advertised set, out of `listen`, and into a
+    // ticket that survives being pasted. What it cannot prove is that
+    // `203.0.113.7` answers from outside — that is the operator's claim and
+    // ultimately the two-machine smoke of system canvas OP-13 (`0008` S5).
+    let alice = peer_or_skip!(ALICE_SECRET_KEY, &asserting(&ASSERTED));
+
+    let endpoints = alice.transport.listen().expect("alice listens");
+    for text in ASSERTED {
+        let asserted = endpoints
+            .iter()
+            .find(|endpoint| endpoint.address() == text)
+            .unwrap_or_else(|| {
+                panic!("{text} is missing from the endpoints alice reports: {endpoints:?}")
+            });
+        assert_eq!(
+            asserted.reachability(),
+            Reachability::Direct,
+            "an address with no circuit hop is dialled directly, whoever supplied it"
+        );
+    }
+
+    let ticket = membership::domain::JoinTicket::expiring_after(
+        alice.peer_id(),
+        endpoints.clone(),
+        ProtocolVersion::CURRENT,
+        Millis::ZERO,
+        DurationMillis::from_secs(3_600),
+    )
+    .expect("a ticket with real endpoints");
+
+    let pasted = JoinTicketCodec::encode(&ticket);
+    let decoded = JoinTicketCodec::decode(&pasted).expect("the string round-trips");
+
+    // Each assertion was also reported over the same event pieces 1 and 2 use,
+    // not a second pipe (P3-2). Drained once and checked as a set, so the test
+    // does not depend on the order two confirmations happen to arrive in.
+    let confirmed: Vec<String> = alice
+        .runtime
+        .events()
+        .drain()
+        .into_iter()
+        .filter_map(|event| match event {
+            NetworkEvent::ExternalAddressConfirmed(endpoint) => Some(endpoint.address().to_owned()),
+            _ => None,
+        })
+        .collect();
+
+    for text in ASSERTED {
+        assert!(
+            decoded
+                .endpoints()
+                .iter()
+                .any(|endpoint| endpoint.address() == text),
+            "{text} must survive into the string a human pastes (P3-4)"
+        );
+        assert!(
+            confirmed.iter().any(|address| address == text),
+            "the root was never told about {text} over the confirmation path; \
+             it saw {confirmed:?}"
+        );
+    }
+
+    // S1: it is *our* address. Nothing turned it into a peer to contact.
+    assert_eq!(
+        alice.discovery.observe_peers(),
+        Ok(Vec::new()),
+        "an asserted address is advertised, never dialled and never cached as \
+         a peer"
+    );
+
+    alice.runtime.shutdown();
+}
+
+#[test]
+fn a_non_global_external_address_refuses_the_start_rather_than_being_ignored() {
+    // P3-8/S3 at the surface a user meets. The exhaustive table of refused
+    // classes is asserted in `swarm/network_driver_test.rs`, against the same
+    // predicate; what this adds is that the refusal reaches the caller of
+    // `start` instead of being swallowed into a peer that launched and quietly
+    // advertised nothing.
+    match Peer::start_with(
+        ALICE_SECRET_KEY,
+        &asserting(&["/ip4/192.168.1.20/tcp/4001"]),
+    ) {
+        Err(NetworkStartError::NonGlobalExternalAddress) => {}
+        // The refusal happens after the transports are assembled, so a machine
+        // that cannot assemble them reports its own problem first. That is a
+        // fact about the machine, and it skips loudly rather than passing
+        // silently — see `crate::required_network`.
+        Err(other) => crate::required_network::skip(&other),
+        Ok(_) => panic!(
+            "a private address was accepted as an external one; advertising \
+             192.168.x.x globally is never useful (P3-8)"
+        ),
+    }
+}
+
+#[test]
+fn a_malformed_external_address_refuses_the_start_before_anything_is_built() {
+    // S4/invariant 4 at this layer. `app` validates the syntax of what it was
+    // typed, but this crate takes a `NetworkConfig` from whoever hands it one
+    // and must not advertise a string it cannot parse — nor start a peer that
+    // silently advertises nothing. No socket is involved: the refusal happens
+    // before a runtime exists, so this test is deterministic everywhere.
+    assert_eq!(
+        Peer::start_with(ALICE_SECRET_KEY, &asserting(&["not-a-multiaddress"]))
+            .map(|_| ())
+            .unwrap_err(),
+        NetworkStartError::MalformedExternalAddress
+    );
+}
+
+#[test]
+fn the_non_global_refusal_says_mdns_already_covers_the_local_network() {
+    // The message is the feature here. A user who typed their LAN address into
+    // `--external-address` was trying to be reachable from another machine, and
+    // the useful answer is not "rejected" — it is that this build already finds
+    // peers on the local link without being told anything at all, so the flag
+    // they reached for is one they do not need.
+    let message = NetworkStartError::NonGlobalExternalAddress.to_string();
+
+    assert!(
+        message.contains("mDNS"),
+        "the refusal must name the mechanism that already covers this case: {message}"
+    );
+    assert!(
+        message.contains("local network"),
+        "and say what that mechanism covers: {message}"
+    );
 }
 
 #[test]

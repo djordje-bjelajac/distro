@@ -94,7 +94,18 @@ impl EventRouter {
             // → re-announce. This is the first moment a NAT-ed peer has a
             // truthful address to publish, and the whole set goes out, not
             // just the new one: an announcement replaces, it does not append.
+            //
+            // It is also the only evidence the root has that an
+            // `--external-address` the operator supplied actually took hold,
+            // which is why the diagnostics see it first: what was asked for is
+            // known at startup, what took effect is only known here, and D6
+            // asks that the two never be inferred from each other. Recording
+            // is the whole of it — an address in effect is still probed, and a
+            // probe that fails still says `unreachable` (S2).
             NetworkEvent::ExternalAddressConfirmed(endpoint) => {
+                self.diagnostics
+                    .record_confirmed_external_address(endpoint.address());
+
                 if self.endpoints.record_confirmed(endpoint) {
                     self.announce();
                 }

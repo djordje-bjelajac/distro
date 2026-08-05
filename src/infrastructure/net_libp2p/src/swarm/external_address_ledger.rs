@@ -227,6 +227,26 @@ impl ExternalAddressLedger {
 
 /// Whether `address` is one a stranger on the open internet could dial.
 ///
+/// # Why this is `pub(crate)` rather than private to the ledger
+///
+/// It has a second caller: an external address the operator *asserts* at
+/// launch (`--external-address`, canvas `0008` D3) has to clear exactly the bar
+/// an observed one does. Advertising `192.168.x.x` globally is no more useful
+/// because a human typed it than because two peers agreed on it.
+///
+/// Reused rather than reimplemented, and reused *as a function* rather than as
+/// a rule copied into the startup path: two predicates would agree on the day
+/// they were written and drift on the first RFC anybody remembered on only one
+/// side. [`NON_GLOBAL`] is the single table both callers are tested against for
+/// the same reason.
+///
+/// It is still not a filter a call site can skip. Each caller applies it as its
+/// *first* act — the ledger before it counts anything (below), the driver before
+/// it advertises anything
+/// ([`assert_external_address`](crate::swarm::network_driver::NetworkDriver::assert_external_address))
+/// — so there is no path in this crate that reaches an advertisement without
+/// passing through here.
+///
 /// # Why the answer is hand-written
 ///
 /// `Ipv4Addr::is_global` and `Ipv6Addr::is_global` are unstable in `std`, so
@@ -253,7 +273,7 @@ impl ExternalAddressLedger {
 /// Documentation ranges (RFC 5737, RFC 3849) are deliberately **not** refused:
 /// nobody's real address falls in them, so refusing them buys no safety, and
 /// they are the correct fixture for a test that must not name a real host.
-fn is_globally_dialable(address: &Multiaddr) -> bool {
+pub(crate) fn is_globally_dialable(address: &Multiaddr) -> bool {
     let mut ip = None;
 
     for protocol in address.iter() {
@@ -313,3 +333,49 @@ fn is_global_v6(address: Ipv6Addr) -> bool {
         // fe80::/10 — link-local unicast.
         || (leading & 0xffc0) == 0xfe80)
 }
+
+/// Every shape [`is_globally_dialable`] refuses, with the reason it is refused.
+///
+/// Deliberately written out rather than generated: each row is a class of
+/// address a peer on the same LAN, behind the same carrier NAT, or on the same
+/// host would observe us at — or that an operator might reasonably type — and
+/// advertising any of them globally would publish an address a stranger cannot
+/// dial.
+///
+/// It lives beside the predicate rather than inside one test file because it is
+/// the predicate's specification and **both** of its callers are asserted
+/// against it: the ledger, in `external_address_ledger_test.rs` (P1-5), and the
+/// asserted-address path, in `network_driver_test.rs` (P3-8). One table, so
+/// the two can never come to refuse different sets.
+///
+/// A `/p2p-circuit` address is refused too and is not a row here: it is built
+/// from a public relay address rather than being a literal, so each test
+/// constructs one from a peer identity it already has.
+#[cfg(test)]
+pub(crate) const NON_GLOBAL: [(&str, &str); 16] = [
+    ("/ip4/127.0.0.1/tcp/4001", "IPv4 loopback"),
+    ("/ip4/10.0.0.4/tcp/4001", "RFC 1918 private, 10/8"),
+    ("/ip4/172.16.3.9/tcp/4001", "RFC 1918 private, 172.16/12"),
+    ("/ip4/192.168.1.20/tcp/4001", "RFC 1918 private, 192.168/16"),
+    ("/ip4/169.254.7.7/tcp/4001", "IPv4 link-local"),
+    ("/ip4/100.64.0.1/tcp/4001", "CGNAT, low edge of 100.64/10"),
+    (
+        "/ip4/100.127.255.254/tcp/4001",
+        "CGNAT, high edge of 100.64/10",
+    ),
+    ("/ip4/0.0.0.0/tcp/4001", "IPv4 unspecified"),
+    ("/ip4/224.0.0.1/tcp/4001", "IPv4 multicast"),
+    ("/ip4/255.255.255.255/tcp/4001", "IPv4 broadcast"),
+    ("/ip6/::1/tcp/4001", "IPv6 loopback"),
+    ("/ip6/::/tcp/4001", "IPv6 unspecified"),
+    ("/ip6/fd00::1/tcp/4001", "IPv6 unique local, fc00::/7"),
+    ("/ip6/fe80::1/tcp/4001", "IPv6 link-local, fe80::/10"),
+    (
+        "/ip6/::ffff:192.168.0.4/tcp/4001",
+        "IPv4-mapped IPv6 carrying a private address",
+    ),
+    (
+        "/dns4/example.com/tcp/4001",
+        "no IP literal at all, so nothing can be judged global",
+    ),
+];

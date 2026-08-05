@@ -3,48 +3,13 @@ use libp2p::{Multiaddr, PeerId as Libp2pPeerId};
 
 use crate::limits::ResourceLimits;
 use crate::swarm::external_address_ledger::{
-    CORROBORATION_THRESHOLD, CandidateRejection, ExternalAddressLedger, Promotion,
+    CORROBORATION_THRESHOLD, CandidateRejection, ExternalAddressLedger, NON_GLOBAL, Promotion,
 };
 
 /// A globally routable address. TEST-NET-3 (RFC 5737) rather than a real
 /// public address: it is reserved for documentation, so nothing in a test can
 /// ever be mistaken for somebody's machine.
 const PUBLIC: &str = "/ip4/203.0.113.7/tcp/4001";
-
-/// Every shape D5 refuses, with the reason it is refused.
-///
-/// This is the table P1-5 is asserted against, and it is deliberately written
-/// out rather than generated: each row is a class of address a peer on the same
-/// LAN, behind the same carrier NAT, or on the same host would observe us at,
-/// and advertising any of them globally would publish an address a stranger
-/// cannot dial.
-const NON_GLOBAL: [(&str, &str); 16] = [
-    ("/ip4/127.0.0.1/tcp/4001", "IPv4 loopback"),
-    ("/ip4/10.0.0.4/tcp/4001", "RFC 1918 private, 10/8"),
-    ("/ip4/172.16.3.9/tcp/4001", "RFC 1918 private, 172.16/12"),
-    ("/ip4/192.168.1.20/tcp/4001", "RFC 1918 private, 192.168/16"),
-    ("/ip4/169.254.7.7/tcp/4001", "IPv4 link-local"),
-    ("/ip4/100.64.0.1/tcp/4001", "CGNAT, low edge of 100.64/10"),
-    (
-        "/ip4/100.127.255.254/tcp/4001",
-        "CGNAT, high edge of 100.64/10",
-    ),
-    ("/ip4/0.0.0.0/tcp/4001", "IPv4 unspecified"),
-    ("/ip4/224.0.0.1/tcp/4001", "IPv4 multicast"),
-    ("/ip4/255.255.255.255/tcp/4001", "IPv4 broadcast"),
-    ("/ip6/::1/tcp/4001", "IPv6 loopback"),
-    ("/ip6/::/tcp/4001", "IPv6 unspecified"),
-    ("/ip6/fd00::1/tcp/4001", "IPv6 unique local, fc00::/7"),
-    ("/ip6/fe80::1/tcp/4001", "IPv6 link-local, fe80::/10"),
-    (
-        "/ip6/::ffff:192.168.0.4/tcp/4001",
-        "IPv4-mapped IPv6 carrying a private address",
-    ),
-    (
-        "/dns4/example.com/tcp/4001",
-        "no IP literal at all, so nothing can be judged global",
-    ),
-];
 
 fn address(text: &str) -> Multiaddr {
     text.parse().expect("a well-formed multiaddress")

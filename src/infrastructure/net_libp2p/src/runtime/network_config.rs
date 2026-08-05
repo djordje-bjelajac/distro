@@ -21,6 +21,36 @@ pub struct NetworkConfig {
     /// would collide with a second instance on the same machine, and any port
     /// this peer picks is published by `announce` anyway.
     pub listen_addresses: Vec<String>,
+    /// Addresses the operator asserts the world reaches this peer at, each
+    /// advertised at startup. Empty — the ordinary case — asserts nothing.
+    ///
+    /// # This peer's own address, and never a host to contact (S1)
+    ///
+    /// The field above is where this peer *binds*; this one is where it says it
+    /// can be *found*. Neither is the bootstrap list documented as absent on
+    /// this type, and this one is not becoming it: every value here is
+    /// advertised so strangers can reach this peer, and nothing dials it, caches
+    /// it as a peer, or gives it to Kademlia as somebody else's address.
+    ///
+    /// # Why a peer would ever assert instead of being told
+    ///
+    /// The two existing routes to an advertised address both need another peer:
+    /// corroborated observation needs two of them, and an AutoNAT probe needs a
+    /// server to dial back. A freshly-installed home server that is the first
+    /// instance on its network has neither, so it would wait for a peer that
+    /// does not exist yet — with a forwarded port sitting there working.
+    ///
+    /// # Asserted, never proven (invariant 3)
+    ///
+    /// This is the *weakest* of the three sources, not the strongest.
+    /// Advertising one of these suppresses neither observation nor probing, and
+    /// a later AutoNAT verdict that the address does not answer still stands: a
+    /// user who asserts a wrong address is still told it does not work.
+    ///
+    /// Each value must parse as a multiaddress and must be globally routable —
+    /// both refused at startup rather than warned about, since a non-global
+    /// address is already covered by the mDNS rung below.
+    pub external_addresses: Vec<String>,
     /// D1 rung (b): unconfigured LAN discovery over mDNS.
     ///
     /// The one thing in this build that speaks without being asked, and only
@@ -71,6 +101,9 @@ impl Default for NetworkConfig {
                 "/ip4/0.0.0.0/udp/0/quic-v1".to_owned(),
                 "/ip4/0.0.0.0/tcp/0".to_owned(),
             ],
+            // Nothing is asserted unless a human asserts it. There is no
+            // address this crate could guess that would not be a lie.
+            external_addresses: Vec::new(),
             enable_lan_discovery: true,
             broadcast_topic: Self::DEFAULT_TOPIC.to_owned(),
             protocol_version: ProtocolVersion::CURRENT,

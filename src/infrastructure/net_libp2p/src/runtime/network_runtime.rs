@@ -59,6 +59,10 @@ impl NetworkRuntime {
         config: &NetworkConfig,
     ) -> Result<Self, NetworkStartError> {
         let listen_addresses = parse_listen_addresses(&config.listen_addresses)?;
+        // Parsed before anything is built, so a typo costs nothing but the
+        // refusal: this is the option a user reaches for when nothing else
+        // worked, and it must never fail quietly (S4).
+        let external_addresses = parse_external_addresses(&config.external_addresses)?;
         let topic = IdentTopic::new(&config.broadcast_topic);
 
         let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -84,7 +88,7 @@ impl NetworkRuntime {
         let (commands_tx, commands_rx) = tokio::sync::mpsc::unbounded_channel();
         let (events_tx, events_rx) = sync_channel(config.limits.event_queue_capacity);
 
-        let driver = NetworkDriver::new(
+        let mut driver = NetworkDriver::new(
             swarm,
             identity.peer_id(),
             topic,
@@ -95,6 +99,16 @@ impl NetworkRuntime {
             commands_rx,
             events_tx,
         );
+
+        // Before the driver is spawned, so the confirmations are already in the
+        // queue the root drains and a ticket minted after the first `listen`
+        // carries them. Refusing here rather than warning is deliberate: this
+        // process clears the screen for a terminal interface moments later, and
+        // a warning printed into that is a warning nobody sees (S3).
+        for address in external_addresses {
+            driver.assert_external_address(address)?;
+        }
+
         runtime.spawn(driver.run());
 
         Ok(Self {
@@ -242,16 +256,42 @@ fn parse_listen_addresses(addresses: &[String]) -> Result<Vec<Multiaddr>, Networ
         .collect()
 }
 
+/// The asserted external addresses, parsed and in the order they were supplied.
+///
+/// An empty configuration is the ordinary case and is not an error — unlike the
+/// listen addresses above, where having none means the peer can do nothing.
+/// Whether each address is one a stranger could dial is *not* decided here: that
+/// filter lives with the predicate it shares with piece 1's ledger and is
+/// applied by
+/// [`NetworkDriver::assert_external_address`](crate::swarm::network_driver::NetworkDriver::assert_external_address),
+/// so there is one such filter in this crate rather than two that drift.
+fn parse_external_addresses(addresses: &[String]) -> Result<Vec<Multiaddr>, NetworkStartError> {
+    addresses
+        .iter()
+        .map(|address| {
+            address
+                .trim()
+                .parse()
+                .map_err(|_| NetworkStartError::MalformedExternalAddress)
+        })
+        .collect()
+}
+
 /// Why the network could not be started.
 ///
-/// All four are configuration or environment problems visible at startup, not
-/// things a peer on the network can cause.
+/// All of them are configuration or environment problems visible at startup,
+/// not things a peer on the network can cause.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NetworkStartError {
     /// The configuration names no address to listen on.
     NoListenAddress,
     /// One of the listen addresses is not a multiaddress.
     MalformedListenAddress,
+    /// One of the asserted external addresses is not a multiaddress.
+    MalformedExternalAddress,
+    /// One of the asserted external addresses is not one a stranger on the open
+    /// internet could dial.
+    NonGlobalExternalAddress,
     /// An async runtime could not be created.
     RuntimeUnavailable,
     /// The transport stack could not be assembled.
@@ -268,6 +308,21 @@ impl fmt::Display for NetworkStartError {
             Self::MalformedListenAddress => {
                 f.write_str("a configured listen address is not a multiaddress")
             }
+            Self::MalformedExternalAddress => {
+                f.write_str("a configured external address is not a multiaddress")
+            }
+            // The refusal is the useful half here. Somebody who typed their LAN
+            // address was trying to be reachable from another machine, and the
+            // answer they need is not "rejected" — it is that this build
+            // already finds peers on the local link without being told
+            // anything, so the option they reached for is one they do not need.
+            Self::NonGlobalExternalAddress => f.write_str(
+                "a configured external address is not reachable from outside \
+                 this network — only an address a stranger on the internet \
+                 could dial can be advertised. mDNS already covers the local \
+                 network, so peers on the same LAN find each other without \
+                 this option",
+            ),
             Self::RuntimeUnavailable => f.write_str("the network runtime could not be created"),
             Self::TransportUnavailable => f.write_str("the transport stack could not be built"),
             Self::BehaviourUnavailable => {

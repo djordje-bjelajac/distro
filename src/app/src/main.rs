@@ -32,6 +32,9 @@ use identity::ports::IdentityQueryPort;
 use infra_net_libp2p::{JoinTicketCodec, NetworkConfig};
 use infra_store_fs::{FileIdentityKeyStore, LocalStores};
 
+#[cfg(test)]
+mod main_test;
+
 fn main() -> ExitCode {
     match run() {
         Ok(()) => ExitCode::SUCCESS,
@@ -80,18 +83,7 @@ fn run() -> Result<(), String> {
 
     let settings = NodeSettings {
         profile_directory,
-        network: NetworkConfig {
-            listen_addresses: if options.listen_addresses.is_empty() {
-                NetworkConfig::default().listen_addresses
-            } else {
-                options.listen_addresses
-            },
-            enable_lan_discovery: options.lan_discovery,
-            broadcast_topic: options
-                .broadcast_topic
-                .unwrap_or_else(|| NetworkConfig::DEFAULT_TOPIC.to_owned()),
-            ..NetworkConfig::default()
-        },
+        network: network_of(options),
     };
 
     let node = Arc::new(Node::start(&settings).map_err(|error| error.to_string())?);
@@ -127,6 +119,38 @@ fn run() -> Result<(), String> {
     }
 
     interface.map_err(|error| format!("the terminal failed: {error}"))
+}
+
+/// The swarm configuration a launch's options ask for.
+///
+/// The only place the two shapes meet, and pure translation: each option either
+/// replaces a default or is passed straight through. Nothing here decides
+/// anything and nothing here validates — a malformed multiaddress was already
+/// refused when it was parsed, and whether an asserted address is one a
+/// stranger could dial is the adapter's judgement, made against the predicate
+/// it already owns.
+///
+/// A function of its own so that it can be asserted rather than read: this is
+/// where an option silently failing to reach the network would look exactly
+/// like an option that had no effect.
+fn network_of(options: LaunchOptions) -> NetworkConfig {
+    NetworkConfig {
+        listen_addresses: if options.listen_addresses.is_empty() {
+            NetworkConfig::default().listen_addresses
+        } else {
+            options.listen_addresses
+        },
+        // Straight through, in the order supplied. These are addresses this
+        // peer is advertised *at*, never hosts it contacts (S1) — the field
+        // they land in says the same thing, and there is nothing between here
+        // and there that could turn one into the other.
+        external_addresses: options.external_addresses,
+        enable_lan_discovery: options.lan_discovery,
+        broadcast_topic: options
+            .broadcast_topic
+            .unwrap_or_else(|| NetworkConfig::DEFAULT_TOPIC.to_owned()),
+        ..NetworkConfig::default()
+    }
 }
 
 /// Reports this profile's identity without starting anything.

@@ -144,6 +144,22 @@ simultaneously through the coordinated timing the relayed connection gives them,
 and if the hole punch lands the traffic moves to a direct link and stops costing
 the relay anything.
 
+**If you have forwarded a port, you can say so.** All three mechanisms above
+need another peer: observation needs several of them to report seeing the same
+address, and a probe needs a server to dial back. The first instance on a
+network has neither, so a freshly forwarded port would sit there working while
+the peer waits for somebody who does not exist yet to notice. `--external-address
+<MULTIADDR>` (repeatable) is the manual way out — the address is advertised from
+startup, in announcements, DHT records and join tickets alike.
+
+It is this peer's *own* address and is never dialled, so it is not the bootstrap
+list this project does not have, wearing a disguise. And asserting it does not
+make it true: it is the weakest of the three sources rather than the strongest,
+observation and probing carry on regardless, and an asserted address that fails a
+probe is reported `unreachable` rather than believed. A private or loopback
+address is refused outright, with a note that mDNS already covers the local
+network.
+
 When it does not work, it says so. Two peers both behind symmetric NAT with no
 reachable peer online cannot connect, full stop — a direct message fails with
 `no relay available` rather than retrying into silence.

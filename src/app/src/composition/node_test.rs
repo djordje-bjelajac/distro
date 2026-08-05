@@ -1,5 +1,5 @@
 use identity::ports::{IdentityCommandPort, IdentityKeyStorePort, IdentityQueryPort};
-use infra_net_libp2p::NetworkConfig;
+use infra_net_libp2p::{NetworkConfig, NetworkStartError};
 use infra_store_fs::LocalStores;
 use membership::ports::MembershipQueryPort;
 use messaging::domain::{ConversationId, MessageBody};
@@ -220,5 +220,98 @@ fn a_node_that_has_not_joined_is_isolated_and_has_no_ticket_to_give() {
     assert_eq!(diagnostics.malformed_frames(), 0);
     assert_eq!(diagnostics.dropped_events(), 0);
 
+    // And nothing was asserted: a launch with no `--external-address` must not
+    // read like one that had it and lost it (D6).
+    assert!(
+        node.diagnostics().external_addresses_supplied().is_empty(),
+        "the ordinary launch asserts no address"
+    );
+    assert!(node.diagnostics().external_addresses_in_effect().is_empty());
+
     node.shutdown();
+}
+
+/// The address the asserted-override tests use.
+///
+/// RFC 5737 documentation space: globally routable as far as the predicate is
+/// concerned, and nobody's real host — so a test that advertises it cannot send
+/// a stranger's peer anywhere.
+const ASSERTED: &str = "/ip4/203.0.113.7/tcp/4001";
+
+#[test]
+fn an_asserted_external_address_reaches_the_network_and_is_reported_as_supplied() {
+    // The wiring OP-3 adds, end to end: a value in `NetworkConfig` survives
+    // `NetworkRuntime::start` — which refuses malformed and non-global ones
+    // before building anything — and is reported by the diagnostics the `d`
+    // overlay reads.
+    let directory = TestDir::new("external-supplied");
+    let settings = NodeSettings {
+        profile_directory: directory.path().to_path_buf(),
+        network: NetworkConfig {
+            external_addresses: vec![ASSERTED.to_owned()],
+            ..NetworkConfig::loopback()
+        },
+    };
+
+    let node = match Node::start(&settings) {
+        Ok(node) => node,
+        Err(error @ StartError::Network(_)) => return crate::required_network::skip(&error),
+        Err(error) => panic!("the node failed to start: {error}"),
+    };
+
+    assert_eq!(
+        node.diagnostics().external_addresses_supplied(),
+        vec![ASSERTED.to_owned()],
+        "what the operator asked for is a launch-time fact and is known the \
+         moment the node exists"
+    );
+    // The other half of D6, and the reason these are two lists: the
+    // confirmation the swarm queued is drained by the engine, which is not
+    // running here. Supplied is not in effect, and nothing pretends otherwise.
+    assert!(
+        node.diagnostics().external_addresses_in_effect().is_empty(),
+        "an assertion reports itself as in effect only once the network says \
+         so — the root cannot infer one from the other (D6, S4)"
+    );
+
+    node.shutdown();
+}
+
+#[test]
+fn a_private_external_address_refuses_the_launch_and_says_mdns_already_covers_it() {
+    // P3-8 through the composition root: the globality predicate belongs to the
+    // adapter, and this is the assertion that it is actually reached from here
+    // — a launch that started anyway would advertise a LAN address to the
+    // internet and look like it had worked.
+    let directory = TestDir::new("external-private");
+    let settings = NodeSettings {
+        profile_directory: directory.path().to_path_buf(),
+        network: NetworkConfig {
+            external_addresses: vec!["/ip4/192.168.1.10/tcp/4001".to_owned()],
+            ..NetworkConfig::loopback()
+        },
+    };
+
+    let error = match Node::start(&settings) {
+        Err(error) => error,
+        Ok(node) => {
+            node.shutdown();
+            panic!("a private external address must refuse the launch (P3-8)")
+        }
+    };
+
+    match error {
+        StartError::Network(NetworkStartError::NonGlobalExternalAddress) => assert!(
+            error.to_string().contains("mDNS"),
+            "somebody who typed their LAN address needs to be told the local \
+             link is already covered, not merely that they were refused: \
+             {error}"
+        ),
+        // The predicate runs after the swarm is built, so a machine that cannot
+        // build one fails earlier and for a different reason. That is a fact
+        // about the machine, and `DISTRO_REQUIRE_NETWORK_TESTS=1` says it is
+        // not.
+        StartError::Network(_) => crate::required_network::skip(&error),
+        other => panic!("the launch failed for a reason that is not the address: {other}"),
+    }
 }

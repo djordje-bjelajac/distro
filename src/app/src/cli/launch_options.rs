@@ -2,6 +2,8 @@ use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::path::PathBuf;
 
+use infra_net_libp2p::mapping::EndpointMapping;
+
 /// Everything a launch can be told, parsed from `argv`.
 ///
 /// # Hand-written rather than a parser dependency
@@ -38,6 +40,27 @@ pub struct LaunchOptions {
     /// what makes the warm-start rung (D1 rung a) and a forwarded port through
     /// a NAT possible.
     pub listen_addresses: Vec<String>,
+    /// `--external-address <MULTIADDR>`, repeatable: addresses the world
+    /// reaches this peer at, asserted by whoever forwarded the port. Empty —
+    /// the ordinary case — means nothing is asserted.
+    ///
+    /// **This peer's own address, not a host to contact** (S1). It is
+    /// advertised so other peers can reach *this* one, and nothing dials it.
+    /// That makes it the same shape as the bootstrap list this project does
+    /// not have, and unrelated to it — the distinction `listen_addresses`
+    /// draws, drawn again for the same reason.
+    ///
+    /// It exists for the peer that has nobody to ask. An address otherwise
+    /// becomes advertised only after two peers have observed it or a probe has
+    /// confirmed it, and the first instance on a network with a freshly
+    /// forwarded port has neither: it would wait for a peer that does not
+    /// exist yet.
+    ///
+    /// Asserted, never proven. Supplying one does not suppress observation or
+    /// probing, and a later verdict that the address does not work still
+    /// stands (S2) — this is the weakest of the three sources of an advertised
+    /// address, not the strongest.
+    pub external_addresses: Vec<String>,
     /// `--no-lan`: switches off mDNS. The one thing this build does
     /// unprompted is multicast on the local link; a user on a network where
     /// that is unwelcome can say so.
@@ -56,6 +79,7 @@ impl Default for LaunchOptions {
             join_ticket: None,
             broadcast_topic: None,
             listen_addresses: Vec::new(),
+            external_addresses: Vec::new(),
             lan_discovery: true,
             print_identity: false,
         }
@@ -112,6 +136,12 @@ impl LaunchOptions {
                         .listen_addresses
                         .push(text_of("--listen", arguments.next())?);
                 }
+                Some("--external-address") => {
+                    let value = text_of("--external-address", arguments.next())?;
+                    options
+                        .external_addresses
+                        .push(external_address("--external-address", &value)?);
+                }
                 _ => return Err(ArgumentError::Unknown(lossy(&argument))),
             }
         }
@@ -134,6 +164,39 @@ fn lossy(argument: &OsStr) -> String {
     argument.to_string_lossy().into_owned()
 }
 
+/// Checks that a value is a well-formed multiaddress and returns the text that
+/// will be advertised.
+///
+/// # Syntax only
+///
+/// Whether the address is *global* is the adapter's judgement — it owns the
+/// tested predicate, and a second copy here would drift from it. Whether the
+/// address actually works from outside is nobody's judgement: it is the
+/// operator's claim, and it is contradicted by evidence rather than checked.
+///
+/// # Why here, when `--listen` is not checked here
+///
+/// A malformed listen address already fails loudly: nothing binds and the
+/// launch stops. A malformed external address would not — the value is only
+/// ever advertised, so the launch would succeed and the peer would be
+/// unreachable in exactly the way the flag was typed to fix. This is the option
+/// someone reaches for when nothing else has worked, so it refuses at the point
+/// it is typed and repeats the value back (P3-3, S4).
+///
+/// The trimmed value is what is kept, because the trimmed value is what was
+/// checked; keeping the untrimmed one would validate one string and advertise
+/// another.
+fn external_address(flag: &'static str, value: &str) -> Result<String, ArgumentError> {
+    let address = value.trim();
+
+    EndpointMapping::parse(address).map_err(|_| ArgumentError::MalformedAddress {
+        flag,
+        value: value.to_owned(),
+    })?;
+
+    Ok(address.to_owned())
+}
+
 /// Why the arguments could not be read.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ArgumentError {
@@ -146,6 +209,16 @@ pub enum ArgumentError {
     MissingValue(&'static str),
     /// An option's value is not valid text.
     NotText(&'static str),
+    /// An option's value had to be a multiaddress and is not one.
+    ///
+    /// Carries the value rather than just the flag, because the point of the
+    /// refusal is to show the user the typo (P3-3, S4).
+    MalformedAddress {
+        /// The option that was given the value.
+        flag: &'static str,
+        /// The value, as it was typed.
+        value: String,
+    },
 }
 
 impl fmt::Display for ArgumentError {
@@ -154,6 +227,10 @@ impl fmt::Display for ArgumentError {
             Self::Unknown(argument) => write!(f, "unknown argument {argument:?}"),
             Self::MissingValue(flag) => write!(f, "{flag} needs a value"),
             Self::NotText(flag) => write!(f, "the value of {flag} is not valid text"),
+            Self::MalformedAddress { flag, value } => write!(
+                f,
+                "the value of {flag} is not a well-formed multiaddress: {value:?}"
+            ),
         }
     }
 }

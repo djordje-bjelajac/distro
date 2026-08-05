@@ -200,6 +200,22 @@ fn diagnostics_of(node: &Arc<Node>) -> Vec<(String, u64)> {
             "reachability probes failed".to_owned(),
             codec.probes_failed(),
         ),
+        // D6, and the reason these are two rows rather than one: the first is
+        // what `--external-address` asked for, the second is how much of it the
+        // network confirmed and is advertising. A supplied address that never
+        // takes effect is the state this option is typed into, and `1` beside
+        // `0` here is the only place it is visible without a debugger.
+        //
+        // Deliberately *not* folded into the adapter's counters above: those
+        // count observations, and an assertion is not one.
+        (
+            "external addresses supplied".to_owned(),
+            local.external_addresses_supplied().len() as u64,
+        ),
+        (
+            "external addresses in effect".to_owned(),
+            local.external_addresses_in_effect().len() as u64,
+        ),
         // S2's tolerance counters and S6's refusals, which only the adapter
         // can see (AC14).
         (

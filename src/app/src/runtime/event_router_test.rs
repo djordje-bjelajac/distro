@@ -256,6 +256,54 @@ fn a_confirmed_external_address_re_announces_every_known_endpoint() {
 }
 
 #[test]
+fn a_confirmation_of_a_supplied_address_reports_the_override_as_in_effect() {
+    // D6's second source. What the operator asked for is known at startup; that
+    // it took hold is known only here, and the router is the one place both
+    // could be joined up.
+    let harness = harness();
+    harness
+        .diagnostics
+        .record_supplied_external_addresses(&["/ip4/203.0.113.7/tcp/1".to_owned()]);
+
+    harness
+        .router
+        .route(NetworkEvent::ExternalAddressConfirmed(endpoint(
+            "/ip4/203.0.113.7/tcp/1",
+        )));
+
+    assert_eq!(
+        harness.diagnostics.external_addresses_in_effect(),
+        vec!["/ip4/203.0.113.7/tcp/1".to_owned()]
+    );
+}
+
+#[test]
+fn a_confirmation_no_option_asked_for_leaves_the_override_report_empty() {
+    // The same event carries a corroborated observation and a successful probe.
+    // Reporting either as an override would say "the flag took effect" to a
+    // user who passed no flag (D6).
+    let harness = harness();
+
+    harness
+        .router
+        .route(NetworkEvent::ExternalAddressConfirmed(endpoint(
+            "/ip4/203.0.113.7/tcp/1",
+        )));
+
+    assert!(
+        harness
+            .diagnostics
+            .external_addresses_in_effect()
+            .is_empty()
+    );
+    assert_eq!(
+        harness.endpoints.all(),
+        vec![endpoint("/ip4/203.0.113.7/tcp/1")],
+        "the address is still advertised — only the override report is untouched"
+    );
+}
+
+#[test]
 fn the_same_confirmation_twice_announces_once() {
     let harness = harness();
     let confirmed = NetworkEvent::ExternalAddressConfirmed(endpoint("/ip4/203.0.113.7/tcp/1"));

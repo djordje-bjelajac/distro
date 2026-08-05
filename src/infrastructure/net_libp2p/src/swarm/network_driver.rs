@@ -19,9 +19,12 @@ use tokio::sync::mpsc::UnboundedReceiver;
 use crate::codec::{CodecDiagnostics, EnvelopeCodec};
 use crate::limits::{InboundRateLimiter, ResourceLimits};
 use crate::mapping::{EndpointMapping, PeerIdMapping};
+use crate::runtime::NetworkStartError;
 use crate::swarm::direct_message_codec::DirectMessageAck;
 use crate::swarm::distro_behaviour::{DistroBehaviour, DistroBehaviourEvent};
-use crate::swarm::external_address_ledger::{ExternalAddressLedger, Promotion};
+use crate::swarm::external_address_ledger::{
+    ExternalAddressLedger, Promotion, is_globally_dialable,
+};
 use crate::swarm::link_registry::LinkRegistry;
 use crate::swarm::network_command::{NetworkCommand, Reply};
 use crate::swarm::network_event::{DirectMessageFailure, NetworkEvent};
@@ -558,6 +561,59 @@ impl NetworkDriver {
         }
     }
 
+    /// Advertises an address the operator asserted this peer is reachable at.
+    ///
+    /// The third and weakest source of an advertised address, called once per
+    /// `--external-address` value while the network is starting and never
+    /// again: it is a launch-time claim, not something a running peer learns.
+    ///
+    /// # Why it goes through the same two calls a corroborated address does
+    ///
+    /// `add_external_address` alone is not enough and
+    /// [`external_address_confirmed`](Self::external_address_confirmed) alone
+    /// is not either — the reasoning is spelled out in full on
+    /// [`external_address_candidate`](Self::external_address_candidate), and it
+    /// is reused here rather than restated because a second advertise path is
+    /// exactly what would drift. Announcements, DHT records, and join tickets
+    /// then follow with no new code (canvas `0008` D2).
+    ///
+    /// # What it deliberately does not do
+    ///
+    /// **It never dials the address, and nothing downstream may (S1).** This is
+    /// *this peer's own* address. It is not passed to `dial`, not remembered in
+    /// `known_addresses`, not given to Kademlia as a peer's address, and not put
+    /// in a ticket's issuer field. The option is shaped like the bootstrap list
+    /// this project refuses to have, and the only thing keeping the two apart is
+    /// that this method advertises and does nothing else.
+    ///
+    /// **It does not touch the two ledgers (invariant 3, S2).** The asserted
+    /// address is not entered into [`ExternalAddressLedger`] as already
+    /// promoted, and no reachability verdict is manufactured for it. So
+    /// observation keeps recording what peers say about this address, AutoNAT
+    /// keeps probing it, and two servers agreeing that it does not answer still
+    /// reports `Unreachable`. An assertion never outranks evidence; a user who
+    /// asserts a wrong address must still be told it is wrong.
+    ///
+    /// # Why the global-address filter is applied here rather than at the call site
+    ///
+    /// Same reason the ledger applies it before counting (D5, S3): a filter at
+    /// the call site is a filter the next call site forgets. This is the only
+    /// way an asserted address reaches the swarm, and it cannot be reached
+    /// without passing [`is_globally_dialable`] first — the same predicate,
+    /// literally, that piece 1 refuses a private observation with (`0008` D3).
+    pub(crate) fn assert_external_address(
+        &mut self,
+        address: Multiaddr,
+    ) -> Result<(), NetworkStartError> {
+        if !is_globally_dialable(&address) {
+            return Err(NetworkStartError::NonGlobalExternalAddress);
+        }
+
+        self.swarm.add_external_address(address.clone());
+        self.external_address_confirmed(address);
+        Ok(())
+    }
+
     /// Takes one AutoNAT server's report on one probe of one address.
     ///
     /// The decision itself is not here: [`ReachabilityLedger`] holds the
@@ -924,6 +980,18 @@ impl NetworkDriver {
         }
 
         self.emit(NetworkEvent::PeerDiscovered(discovered));
+    }
+
+    /// How many addresses this driver holds for peers it might dial.
+    ///
+    /// Test-only, and it exists for one assertion: an asserted external address
+    /// is *this peer's own*, and S1 forbids it ever becoming an address of a
+    /// peer to contact. Counting what
+    /// [`assert_external_address`](Self::assert_external_address) left behind
+    /// here is how that is checked rather than assumed.
+    #[cfg(test)]
+    pub(crate) fn known_peer_address_count(&self) -> usize {
+        self.known_addresses.values().map(Vec::len).sum()
     }
 
     fn remember(&mut self, remote: Libp2pPeerId, addresses: &[Multiaddr]) {

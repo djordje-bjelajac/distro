@@ -56,6 +56,26 @@ fn the_listen_option_says_plainly_that_it_is_not_a_bootstrap_list() {
 }
 
 #[test]
+fn the_external_address_option_says_plainly_whose_address_it_is() {
+    // The second option whose shape could be mistaken for the thing S1 forbids
+    // — a multiaddress on the command line. The distinction is total: it is
+    // this peer's own address, advertised and never dialled. It is also
+    // invisible to someone skimming `--help`, so the text says it outright
+    // (P3-5, D4) and this pins the sentence.
+    let text = Usage::text();
+
+    assert!(text.contains("--external-address"));
+    assert!(
+        text.contains("this peer's own address, not a host to contact"),
+        "the help text must say whose address this is, in as many words"
+    );
+    assert!(
+        text.contains("never dialled"),
+        "the help text must say the address is advertised and not contacted"
+    );
+}
+
+#[test]
 fn the_ui_disclosures_repeat_both_safeguards() {
     let overlay = Usage::DISCLOSURES.join(" ").to_lowercase();
 

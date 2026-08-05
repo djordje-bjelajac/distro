@@ -1,5 +1,5 @@
-//! What the driver does with an external-address candidate, and with an
-//! AutoNAT probe report.
+//! What the driver does with an external-address candidate, with an AutoNAT
+//! probe report, and with an address the operator simply asserts.
 //!
 //! # Why this test drives the driver rather than two real swarms
 //!
@@ -27,6 +27,19 @@
 //! that failures are corroborated before they condemn. It does not prove that a
 //! genuinely unreachable peer says so; that is the two-machine smoke of system
 //! canvas OP-13, which has not been run.
+//!
+//! # And the same again for an asserted address
+//!
+//! The third source of an advertised address — `--external-address`, canvas
+//! `0008` — is an operator's claim, so what can be tested is what this process
+//! *does* with the claim: that a global one reaches the same
+//! `NetworkEvent::ExternalAddressConfirmed` a corroborated one does (P3-2),
+//! that a non-global one is refused (P3-8), and — the assertions that matter
+//! most, because this is the one place the three pieces could contradict each
+//! other — that supplying one silences neither the ledger above nor the probes
+//! above that (P3-7/S2). Whether the asserted address genuinely works from
+//! outside is the operator's claim, and nothing here pretends to check it
+//! (`0008` S5).
 
 use std::sync::mpsc::{Receiver, TryRecvError, sync_channel};
 
@@ -44,9 +57,10 @@ use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
 use crate::codec::{CodecDiagnostics, EnvelopeCodec};
 use crate::mapping::EndpointMapping;
 use crate::runtime::network_runtime::build_swarm;
-use crate::runtime::{NetworkConfig, NetworkIdentity};
+use crate::runtime::{NetworkConfig, NetworkIdentity, NetworkStartError};
 use crate::swarm::NetworkEvent;
 use crate::swarm::distro_behaviour::DistroBehaviourEvent;
+use crate::swarm::external_address_ledger::NON_GLOBAL;
 use crate::swarm::network_command::NetworkCommand;
 use crate::swarm::network_driver::NetworkDriver;
 use crate::swarm::reachability_ledger::{ProbeResult, Reachability};
@@ -55,6 +69,10 @@ use crate::test_peers::ALICE_SECRET_KEY;
 /// A globally routable address, from RFC 5737's documentation range so nothing
 /// here can be mistaken for a real host.
 const PUBLIC: &str = "/ip4/203.0.113.7/tcp/4001";
+
+/// A second globally routable address, so a test can tell an *asserted* address
+/// apart from an *observed* one rather than watching them collide.
+const OTHER_PUBLIC: &str = "/ip4/203.0.113.8/tcp/4001";
 
 /// The driver, the queue it writes to, and the counters it increments.
 struct Harness {
@@ -138,6 +156,15 @@ impl Harness {
             });
     }
 
+    /// Asserts one external address at the driver, the way startup does.
+    ///
+    /// The same call `NetworkRuntime::start` makes, with the same argument —
+    /// there is no test-only entry point, so what is exercised below is the
+    /// production path and not a rehearsal of it.
+    fn assert_external(&mut self, text: &str) -> Result<(), NetworkStartError> {
+        self.driver.assert_external_address(address(text))
+    }
+
     /// Hands the driver a successful AutoNAT probe report, in the shape
     /// `autonat::v2::client` emits it — a real `DistroBehaviourEvent` through
     /// the real `handle_swarm_event`, so the match arm is what routes it.
@@ -207,6 +234,15 @@ fn keypair(seed: u8) -> Keypair {
 /// deliberately *different* from the candidate the driver is given next, so a
 /// driver that quietly read it instead of the candidate would fail here.
 fn identified(observer: &Keypair) -> SwarmEvent<DistroBehaviourEvent> {
+    identified_listening_at(observer, Vec::new())
+}
+
+/// The same event, with addresses the observer says *it* can be reached at —
+/// which is what makes the driver remember a peer worth dialling.
+fn identified_listening_at(
+    observer: &Keypair,
+    listen_addrs: Vec<Multiaddr>,
+) -> SwarmEvent<DistroBehaviourEvent> {
     SwarmEvent::Behaviour(DistroBehaviourEvent::Identify(identify::Event::Received {
         connection_id: ConnectionId::new_unchecked(1),
         peer_id: observer.public().to_peer_id(),
@@ -214,7 +250,7 @@ fn identified(observer: &Keypair) -> SwarmEvent<DistroBehaviourEvent> {
             public_key: observer.public(),
             protocol_version: "/distro/id/1.0.0".to_owned(),
             agent_version: "distro-test".to_owned(),
-            listen_addrs: Vec::new(),
+            listen_addrs,
             protocols: Vec::new(),
             observed_addr: address("/ip4/198.51.100.9/tcp/9999"),
             signed_peer_record: None,
@@ -572,6 +608,215 @@ fn a_probe_report_does_not_disturb_the_external_address_ledger() {
         "a probe is not an observation, and does not corroborate one"
     );
     assert!(confirmed_addresses(&harness.drain()).is_empty());
+}
+
+// ------------------------------------------------ an asserted address (0008)
+
+/// The event the composition root should see for an address advertised at
+/// `text`, whichever of the three sources produced it.
+///
+/// Built through [`EndpointMapping`] rather than by hand so that the
+/// reachability class is derived from the address the same way production
+/// derives it — an asserted address is `Direct` because it contains no circuit
+/// hop, not because a test said so.
+fn confirmed_at(text: &str) -> NetworkEvent {
+    NetworkEvent::ExternalAddressConfirmed(
+        EndpointMapping::parse(text).expect("a well-formed multiaddress"),
+    )
+}
+
+/// A relay circuit address through `PUBLIC`: reachable *through* another peer,
+/// which is not something this peer may assert about itself.
+fn circuit() -> String {
+    format!(
+        "{PUBLIC}/p2p/{}/p2p-circuit",
+        keypair(9).public().to_peer_id()
+    )
+}
+
+#[test]
+fn a_supplied_external_address_reaches_the_confirmation_path_the_other_two_use() {
+    // P3-1 and P3-2. The whole of the feature at this level: the operator's
+    // claim arrives at the composition root as the same event a corroborated
+    // observation and a successful probe arrive as, so announcements, DHT
+    // records, and join tickets follow with no new code (D2).
+    let mut harness = harness_or_skip!();
+
+    assert_eq!(harness.assert_external(PUBLIC), Ok(()));
+
+    assert_eq!(
+        harness.drain(),
+        vec![confirmed_at(PUBLIC)],
+        "one advertisement, over the existing path, and nothing else"
+    );
+    assert_eq!(
+        harness.diagnostics.external_candidates_seen(),
+        0,
+        "an assertion is not an observation and must not be counted as one"
+    );
+    assert_eq!(harness.diagnostics.external_addresses_promoted(), 0);
+}
+
+#[test]
+fn several_supplied_external_addresses_are_every_one_advertised() {
+    // P3-1's repeatability at the level that decides it. A dual-stack host has
+    // an IPv4 and an IPv6 external address, and a host that forwarded both
+    // transports has two of each; taking only the first would silently drop
+    // half of what the operator asserted.
+    let mut harness = harness_or_skip!();
+    let supplied = [
+        PUBLIC,
+        OTHER_PUBLIC,
+        "/ip6/2001:db8::1/tcp/4001",
+        "/ip4/203.0.113.7/udp/4001/quic-v1",
+    ];
+
+    for text in supplied {
+        assert_eq!(harness.assert_external(text), Ok(()), "{text}");
+    }
+
+    assert_eq!(
+        harness.drain(),
+        supplied
+            .iter()
+            .copied()
+            .map(confirmed_at)
+            .collect::<Vec<_>>(),
+        "every supplied address is advertised, in the order it was supplied"
+    );
+}
+
+#[test]
+fn no_non_global_supplied_address_is_ever_advertised() {
+    // P3-8/S3, against the *same* table piece 1's ledger is asserted against
+    // (`NON_GLOBAL` lives beside the predicate for exactly this reason). A
+    // second filter written here would agree with that one today and drift from
+    // it on the first class either side remembered alone.
+    //
+    // Refused rather than warned: this build clears the screen for a TUI
+    // moments later, so a warning is a message to nobody.
+    let mut harness = harness_or_skip!();
+
+    for (text, why) in NON_GLOBAL {
+        assert_eq!(
+            harness.assert_external(text),
+            Err(NetworkStartError::NonGlobalExternalAddress),
+            "{text} ({why}) must never be advertised"
+        );
+    }
+
+    assert_eq!(
+        harness.assert_external(&circuit()),
+        Err(NetworkStartError::NonGlobalExternalAddress),
+        "a circuit's public relay address is the relay's, not ours"
+    );
+
+    assert!(
+        harness.drain().is_empty(),
+        "a refused address reaches nothing at all — not the event queue, not \
+         the swarm, not a join ticket"
+    );
+}
+
+#[test]
+fn an_asserted_address_is_advertised_and_never_becomes_a_peer_to_contact() {
+    // **S1, the safeguard this option exists in tension with.** The value is
+    // this peer's *own* address. It is advertised so strangers can reach us,
+    // and it is never dialled, cached as a peer, or handed to Kademlia as
+    // somebody's address — which is the entire distinction between this option
+    // and the bootstrap list this project does not have.
+    let mut harness = harness_or_skip!();
+
+    assert_eq!(harness.assert_external(PUBLIC), Ok(()));
+
+    assert_eq!(
+        harness.drain(),
+        vec![confirmed_at(PUBLIC)],
+        "advertised — and no peer was discovered, because there was no peer"
+    );
+    assert_eq!(
+        harness.driver.known_peer_address_count(),
+        0,
+        "an asserted address must not enter the set of addresses this peer \
+         would dial (S1)"
+    );
+
+    // The control, so the zero above is a fact rather than a broken accessor:
+    // an address that genuinely belongs to somebody else does land there.
+    harness.driver.handle_swarm_event(identified_listening_at(
+        &keypair(1),
+        vec![address(OTHER_PUBLIC)],
+    ));
+    assert_eq!(harness.driver.known_peer_address_count(), 1);
+}
+
+#[test]
+fn an_override_does_not_stop_the_ledger_recording_what_peers_observe() {
+    // P3-7/S2, first half. An assertion is the *weakest* of the three sources
+    // of an advertised address, not the strongest: supplying one must not put
+    // the peer into a state where it stops listening to what other peers say
+    // about it.
+    let mut harness = harness_or_skip!();
+    assert_eq!(harness.assert_external(PUBLIC), Ok(()));
+    assert_eq!(harness.drain(), vec![confirmed_at(PUBLIC)]);
+
+    // Observation of a *different* address still runs the full corroboration
+    // path and still promotes.
+    harness.identify_then_candidate(&keypair(1), OTHER_PUBLIC);
+    assert_eq!(harness.diagnostics.external_candidates_recorded(), 1);
+    assert!(confirmed_addresses(&harness.drain()).is_empty());
+
+    harness.identify_then_candidate(&keypair(2), OTHER_PUBLIC);
+    assert_eq!(harness.diagnostics.external_addresses_promoted(), 1);
+    assert_eq!(harness.drain(), vec![confirmed_at(OTHER_PUBLIC)]);
+
+    // And observation of the asserted address itself is still recorded. The
+    // asserted address is deliberately *not* entered into the ledger as
+    // already-promoted: doing so would make an operator's claim suppress the
+    // evidence about it, which is the thing invariant 3 forbids.
+    harness.identify_then_candidate(&keypair(1), PUBLIC);
+    assert_eq!(
+        harness.diagnostics.external_candidates_recorded(),
+        2,
+        "evidence about the asserted address is still collected"
+    );
+}
+
+#[test]
+fn an_override_is_still_probed_and_can_still_be_contradicted() {
+    // **P3-7/S2, second half, and the point of the whole safeguard.** A user
+    // who asserts an address that does not work must still be told it does not
+    // work. Piece 2's honesty is not something an operator can switch off by
+    // typing a flag, and this is the one place the three pieces could have been
+    // made to contradict each other.
+    let mut harness = harness_or_skip!();
+    assert_eq!(harness.assert_external(PUBLIC), Ok(()));
+    assert_eq!(harness.drain(), vec![confirmed_at(PUBLIC)]);
+
+    // Probing continues, and every probe is still counted — the failure mode of
+    // this whole area is silence.
+    harness.probe_failed(&keypair(1), PUBLIC);
+    assert_eq!(harness.diagnostics.probes_run(), 1);
+    assert_eq!(harness.diagnostics.probes_failed(), 1);
+    assert!(
+        verdicts(&harness.drain()).is_empty(),
+        "one server's word still is not enough, override or no override"
+    );
+
+    harness.probe_failed(&keypair(2), PUBLIC);
+    assert_eq!(
+        verdicts(&harness.drain()),
+        vec![Reachability::Unreachable],
+        "an assertion never outranks evidence: two servers agreeing that the \
+         asserted address does not answer still reports Unreachable (S2)"
+    );
+
+    // And the return trip works from there too, so the assertion has not
+    // latched the verdict in either direction.
+    harness.probe_succeeded(&keypair(3), PUBLIC);
+    assert_eq!(verdicts(&harness.drain()), vec![reachable_at(PUBLIC)]);
+    assert_eq!(harness.diagnostics.probes_run(), 3);
+    assert_eq!(harness.diagnostics.probes_succeeded(), 1);
 }
 
 /// The observer this crate maps a keypair to, used only to keep the fixtures
