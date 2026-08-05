@@ -13,7 +13,10 @@ mod network_config;
 mod network_events;
 mod network_handle;
 mod network_identity;
-mod network_runtime;
+/// Crate-visible rather than private so that a test elsewhere in this crate can
+/// assemble the *same* swarm production does — a driver test that built its own
+/// would be testing a swarm nobody ships.
+pub(crate) mod network_runtime;
 #[cfg(test)]
 mod network_runtime_test;
 

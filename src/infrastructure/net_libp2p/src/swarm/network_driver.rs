@@ -21,6 +21,7 @@ use crate::limits::{InboundRateLimiter, ResourceLimits};
 use crate::mapping::{EndpointMapping, PeerIdMapping};
 use crate::swarm::direct_message_codec::DirectMessageAck;
 use crate::swarm::distro_behaviour::{DistroBehaviour, DistroBehaviourEvent};
+use crate::swarm::external_address_ledger::{ExternalAddressLedger, Promotion};
 use crate::swarm::link_registry::LinkRegistry;
 use crate::swarm::network_command::{NetworkCommand, Reply};
 use crate::swarm::network_event::{DirectMessageFailure, NetworkEvent};
@@ -62,11 +63,18 @@ pub(crate) struct NetworkDriver {
     diagnostics: CodecDiagnostics,
     rate_limiter: InboundRateLimiter,
     links: LinkRegistry,
+    external_addresses: ExternalAddressLedger,
     started_at: Instant,
 
     commands: UnboundedReceiver<NetworkCommand>,
     events: SyncSender<NetworkEvent>,
 
+    /// Who reported the external-address candidates that are about to arrive.
+    ///
+    /// See [`handle_swarm_event`](NetworkDriver::handle_swarm_event) for why
+    /// this exists and why the window it describes is exactly one swarm event
+    /// wide.
+    candidate_observer: Option<Libp2pPeerId>,
     listening: Vec<Multiaddr>,
     pending_listen: Option<PendingListen>,
     pending_dials: HashMap<Libp2pPeerId, Vec<PendingDial>>,
@@ -107,6 +115,12 @@ impl NetworkDriver {
         commands: UnboundedReceiver<NetworkCommand>,
         events: SyncSender<NetworkEvent>,
     ) -> Self {
+        let external_addresses = ExternalAddressLedger::new(
+            *swarm.local_peer_id(),
+            limits.max_candidate_addresses,
+            limits.max_observers_per_address,
+        );
+
         Self {
             swarm,
             topic,
@@ -119,9 +133,11 @@ impl NetworkDriver {
                 limits.inbound_envelope_burst,
             ),
             links: LinkRegistry::new(local),
+            external_addresses,
             started_at: Instant::now(),
             commands,
             events,
+            candidate_observer: None,
             listening: Vec::new(),
             pending_listen: None,
             pending_dials: HashMap::new(),
@@ -415,7 +431,37 @@ impl NetworkDriver {
 
     // -------------------------------------------------------- swarm events
 
-    fn handle_swarm_event(&mut self, event: SwarmEvent<DistroBehaviourEvent>) {
+    /// Takes one event off the swarm.
+    ///
+    /// # The attribution window, and why it is opened and closed here
+    ///
+    /// `SwarmEvent::NewExternalAddrCandidate` carries an address and nothing
+    /// else — not the peer that reported it. Counting an unattributed
+    /// observation toward corroboration would make the threshold meaningless
+    /// (S4), so the observer has to come from somewhere, and the only honest
+    /// source is the identify exchange that produced the candidate.
+    ///
+    /// `libp2p-identify` pushes `Event::Received` and the candidate(s) it
+    /// derived from the same `observed_addr` onto one queue, in that order and
+    /// back to back (`libp2p-identify-0.47.0/src/behaviour.rs:456-493`), and
+    /// the swarm drains that queue into `pending_swarm_events` first-in
+    /// first-out (`libp2p-swarm-0.47.1/src/lib.rs:1093-1142,1202`). So a
+    /// candidate is always immediately preceded by the identify event that
+    /// caused it, and `identify` is the only behaviour in [`DistroBehaviour`]
+    /// that emits candidates at all — `dcutr` and `autonat::v2::client`
+    /// *consume* `FromSwarm::NewExternalAddrCandidate` and never produce one.
+    ///
+    /// That ordering is the attribution, and taking the observer at the top of
+    /// this method is what pins it down: every event except a candidate closes
+    /// the window, the identify arm reopens it, and a candidate restores it
+    /// because one identify exchange can yield several translated addresses
+    /// that all belong to the same observer. A candidate that arrives outside
+    /// the window — which a future behaviour emitting candidates from
+    /// somewhere else would produce — is seen, counted in diagnostics, and
+    /// deliberately not corroborated.
+    pub(crate) fn handle_swarm_event(&mut self, event: SwarmEvent<DistroBehaviourEvent>) {
+        let observer = self.candidate_observer.take();
+
         match event {
             SwarmEvent::NewListenAddr {
                 listener_id,
@@ -423,13 +469,12 @@ impl NetworkDriver {
             } => self.listener_ready(listener_id, address),
             SwarmEvent::ListenerError { listener_id, .. } => self.listener_done(listener_id),
             SwarmEvent::ListenerClosed { listener_id, .. } => self.listener_done(listener_id),
+            SwarmEvent::NewExternalAddrCandidate { address } => {
+                self.candidate_observer = observer;
+                self.external_address_candidate(address);
+            }
             SwarmEvent::ExternalAddrConfirmed { address } => {
-                if !self.announced.contains(&address) {
-                    self.announced.push(address.clone());
-                }
-                if let Some(endpoint) = endpoint_of(&address) {
-                    self.emit(NetworkEvent::ExternalAddressConfirmed(endpoint));
-                }
+                self.external_address_confirmed(address);
             }
             SwarmEvent::ConnectionEstablished {
                 peer_id,
@@ -449,6 +494,64 @@ impl NetworkDriver {
             } => self.dial_failed(peer, &error),
             SwarmEvent::Behaviour(event) => self.handle_behaviour_event(event),
             _ => {}
+        }
+    }
+
+    /// Takes one peer's claim about where this peer is seen from.
+    ///
+    /// The decision itself is not here: [`ExternalAddressLedger`] holds the
+    /// corroboration threshold, the global-address filter, and both bounds, so
+    /// that all three are testable without a swarm and cannot be bypassed by a
+    /// second call site (D5, S3). This method does the two things that need a
+    /// swarm — attribute the observation and act on the verdict.
+    fn external_address_candidate(&mut self, address: Multiaddr) {
+        self.diagnostics.count_external_candidate_seen();
+
+        // No attributable observer means no corroboration (S4). Counting it
+        // anonymously would let one peer meet the threshold by itself, which is
+        // the exact attack the threshold exists to stop.
+        let Some(observer) = self.candidate_observer else {
+            return;
+        };
+
+        match self.external_addresses.observe(observer, address) {
+            Promotion::Recorded { .. } => self.diagnostics.count_external_candidate_recorded(),
+            Promotion::Promote(address) => {
+                self.diagnostics.count_external_address_promoted();
+
+                // Two calls, not one, and the second is not optional.
+                //
+                // `Swarm::add_external_address` only broadcasts
+                // `FromSwarm::ExternalAddrConfirmed` *to the behaviours* — it
+                // tells Kademlia, AutoNAT, and the relay client where this peer
+                // says it is, which is what makes the DHT record and the relay
+                // reservation carry the address. It does **not** push a
+                // `SwarmEvent::ExternalAddrConfirmed` back to the application
+                // (`libp2p-swarm-0.47.1/src/lib.rs:599-605`); only a behaviour
+                // emitting `ToSwarm::ExternalAddrConfirmed` does that. So the
+                // confirmation the composition root listens for has to be
+                // entered directly, through the same method that arm uses.
+                self.swarm.add_external_address(address.clone());
+                self.external_address_confirmed(address);
+            }
+            Promotion::Ignored(_) => {}
+        }
+    }
+
+    /// Records an address this peer is now willing to advertise, and says so.
+    ///
+    /// The one place a confirmed external address enters, whichever side
+    /// confirmed it — a corroborated candidate above, or a behaviour that
+    /// reported `ToSwarm::ExternalAddrConfirmed` for itself. `announced` is
+    /// what [`local_endpoints`](Self::local_endpoints) reads, so a join ticket
+    /// minted afterwards carries the address; the event is what makes the
+    /// composition root re-announce (D4).
+    fn external_address_confirmed(&mut self, address: Multiaddr) {
+        if !self.announced.contains(&address) {
+            self.announced.push(address.clone());
+        }
+        if let Some(endpoint) = endpoint_of(&address) {
+            self.emit(NetworkEvent::ExternalAddressConfirmed(endpoint));
         }
     }
 
@@ -590,6 +693,17 @@ impl NetworkDriver {
     fn handle_behaviour_event(&mut self, event: DistroBehaviourEvent) {
         match event {
             DistroBehaviourEvent::Identify(identify::Event::Received { peer_id, info, .. }) => {
+                // Opens the attribution window described on `handle_swarm_event`:
+                // the external-address candidates identify is about to emit
+                // were derived from *this* peer's report, and this is the only
+                // event that carries who that peer is.
+                //
+                // `info.observed_addr` is deliberately not read. identify
+                // performs NAT address translation before emitting a candidate
+                // (`behaviour.rs:333-384`), so reading the raw observation here
+                // would duplicate that translation, diverge from it on upgrade,
+                // and miss candidates from any other source (D1).
+                self.candidate_observer = Some(peer_id);
                 self.record_discovery(peer_id, info.listen_addrs);
             }
             DistroBehaviourEvent::Kademlia(kad::Event::RoutingUpdated {

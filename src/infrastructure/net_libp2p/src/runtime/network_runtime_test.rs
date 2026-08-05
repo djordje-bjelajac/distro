@@ -6,6 +6,7 @@ use messaging::ports::{MessageTransportError, MessageTransportPort};
 use shared_types::{Envelope, EnvelopeSignature, PayloadKind, PeerId, ProtocolVersion};
 
 use crate::adapters::{Libp2pMessageTransport, Libp2pPeerDiscovery, Libp2pPeerTransport};
+use crate::codec::CodecDiagnostics;
 use crate::runtime::{NetworkConfig, NetworkIdentity, NetworkRuntime, NetworkStartError};
 use crate::swarm::NetworkEvent;
 use crate::test_peers::{ALICE_SECRET_KEY, BOB_SECRET_KEY, carol};
@@ -53,6 +54,26 @@ impl Peer {
 
     fn peer_id(&self) -> PeerId {
         self.runtime.local_peer()
+    }
+
+    /// Waits until the counters satisfy `wanted`, or the deadline passes.
+    ///
+    /// Polls rather than waiting on an event, because what is being waited for
+    /// here is something the driver *counted*, not something it reported. Same
+    /// generous deadline and same reasoning: the assertion is on what happened,
+    /// never on how long it took.
+    fn await_diagnostics(&self, wanted: impl Fn(&CodecDiagnostics) -> bool) -> bool {
+        let deadline = Instant::now() + DEADLINE;
+        let diagnostics = self.runtime.diagnostics();
+
+        while Instant::now() < deadline {
+            if wanted(&diagnostics) {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+
+        wanted(&diagnostics)
     }
 
     /// Waits for the first event matching `wanted`, discarding the rest.
@@ -307,6 +328,63 @@ fn a_join_ticket_minted_from_real_endpoints_brings_a_stranger_in() {
             matches!(event, NetworkEvent::SessionEstablished { peer, .. } if *peer == bob.peer_id())
         })
         .expect("alice sees the newcomer arrive");
+
+    alice.runtime.shutdown();
+    bob.runtime.shutdown();
+}
+
+#[test]
+fn observed_addresses_reach_the_ledger_and_a_loopback_one_is_never_advertised() {
+    // Two real swarms, so the question is whether the wiring exists at all:
+    // does `identify` produce external-address candidates, does the driver's
+    // new arm receive them, and does the ledger refuse the only kind of
+    // address a test on one machine can ever produce?
+    //
+    // # What this test can and cannot prove, stated rather than implied
+    //
+    // Every address two peers on loopback observe each other at is
+    // `127.0.0.1`, which D5 refuses. So a *promotion* cannot happen here, and
+    // no arrangement of loopback peers would make one happen — the analysis
+    // said as much (§5: the simulated fabric has no concept of a public
+    // address). What this test proves is the half that needs two real swarms:
+    // that candidates genuinely flow, that the driver sees them, and that the
+    // refusal is real rather than an accident of a mocked event. The
+    // promotion path itself — corroboration, `add_external_address`, and
+    // `NetworkEvent::ExternalAddressConfirmed` — is proven in
+    // `swarm/network_driver_test.rs`, where the observing peer can be two
+    // different peers and the address can be a public one.
+    let alice = peer_or_skip!(ALICE_SECRET_KEY);
+    let bob = peer_or_skip!(BOB_SECRET_KEY);
+
+    let alice_endpoints = alice.transport.listen().expect("alice listens");
+    bob.transport.listen().expect("bob listens");
+    bob.transport
+        .dial(alice.peer_id(), &alice_endpoints)
+        .expect("bob reaches alice");
+
+    // identify runs on both sides of a new connection, so both peers learn an
+    // address the other sees them at (P1-7: the counter is how anyone ever
+    // finds out whether this is happening).
+    assert!(
+        alice.await_diagnostics(|diagnostics| diagnostics.external_candidates_seen() > 0),
+        "the driver's candidate arm never received an observed address, so the \
+         wiring identify has always produced is still going nowhere"
+    );
+    assert!(bob.await_diagnostics(|diagnostics| diagnostics.external_candidates_seen() > 0));
+
+    for peer in [&alice, &bob] {
+        let diagnostics = peer.runtime.diagnostics();
+        assert_eq!(
+            diagnostics.external_candidates_recorded(),
+            0,
+            "a loopback address is not a candidate for anything (P1-5, S3)"
+        );
+        assert_eq!(
+            diagnostics.external_addresses_promoted(),
+            0,
+            "and it is certainly never advertised"
+        );
+    }
 
     alice.runtime.shutdown();
     bob.runtime.shutdown();

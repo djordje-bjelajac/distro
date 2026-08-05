@@ -193,7 +193,7 @@ const SHUTDOWN_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
 /// * **TCP + Noise + Yamux** is the fallback, and it is what a relayed circuit
 ///   runs over — so Noise is exactly where AC12's "relayed bytes are ciphertext
 ///   to the relay" is enforced.
-fn build_swarm(
+pub(crate) fn build_swarm(
     identity: &NetworkIdentity,
     config: &NetworkConfig,
     topic: &IdentTopic,

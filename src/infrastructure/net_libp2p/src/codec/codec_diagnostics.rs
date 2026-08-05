@@ -31,6 +31,9 @@ struct Counters {
     malformed_frames: AtomicU64,
     rate_limited: AtomicU64,
     dropped_events: AtomicU64,
+    external_candidates_seen: AtomicU64,
+    external_candidates_recorded: AtomicU64,
+    external_addresses_promoted: AtomicU64,
 }
 
 impl CodecDiagnostics {
@@ -83,6 +86,40 @@ impl CodecDiagnostics {
         self.counters.dropped_events.load(Ordering::Relaxed)
     }
 
+    /// Addresses a remote peer reported seeing this peer at, counted as they
+    /// arrive and before any of them is judged.
+    ///
+    /// # Why external-address discovery is counted at all
+    ///
+    /// Its failure mode is silence: a peer that never learns its public
+    /// address simply stays unreachable, and looks from the inside exactly
+    /// like a peer nobody happens to be messaging. These three numbers are the
+    /// only way to tell the difference. Read together they say where the
+    /// process stopped — nothing seen means no peer is identifying us, seen
+    /// without recorded means every observation was a LAN or loopback address,
+    /// and recorded without promoted means no second peer has corroborated one
+    /// yet.
+    pub fn external_candidates_seen(&self) -> u64 {
+        self.counters
+            .external_candidates_seen
+            .load(Ordering::Relaxed)
+    }
+
+    /// Observed addresses that were attributed to a peer, passed the
+    /// global-address filter, and were counted toward corroboration.
+    pub fn external_candidates_recorded(&self) -> u64 {
+        self.counters
+            .external_candidates_recorded
+            .load(Ordering::Relaxed)
+    }
+
+    /// Addresses corroborated by enough distinct peers to be advertised.
+    pub fn external_addresses_promoted(&self) -> u64 {
+        self.counters
+            .external_addresses_promoted
+            .load(Ordering::Relaxed)
+    }
+
     pub(crate) fn count_tolerated_minor(&self) {
         self.counters
             .tolerated_minor
@@ -123,5 +160,23 @@ impl CodecDiagnostics {
 
     pub(crate) fn count_dropped_event(&self) {
         self.counters.dropped_events.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn count_external_candidate_seen(&self) {
+        self.counters
+            .external_candidates_seen
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn count_external_candidate_recorded(&self) {
+        self.counters
+            .external_candidates_recorded
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn count_external_address_promoted(&self) {
+        self.counters
+            .external_addresses_promoted
+            .fetch_add(1, Ordering::Relaxed);
     }
 }

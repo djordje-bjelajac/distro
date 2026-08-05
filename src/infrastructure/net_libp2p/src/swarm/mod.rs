@@ -13,11 +13,16 @@ mod direct_message_codec_test;
 pub(crate) mod distro_behaviour;
 #[cfg(test)]
 mod distro_behaviour_test;
+pub(crate) mod external_address_ledger;
+#[cfg(test)]
+mod external_address_ledger_test;
 pub(crate) mod link_registry;
 #[cfg(test)]
 mod link_registry_test;
 pub(crate) mod network_command;
 pub(crate) mod network_driver;
+#[cfg(test)]
+mod network_driver_test;
 mod network_event;
 
 pub use network_event::{DirectMessageFailure, NetworkEvent};

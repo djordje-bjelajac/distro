@@ -50,6 +50,10 @@ pub struct ResourceLimits {
     pub max_relay_circuits_per_peer: usize,
     /// Simultaneous relayed circuits this peer will carry in total.
     pub max_relay_circuits: usize,
+    /// Observed external addresses tracked at once, promoted ones included.
+    pub max_candidate_addresses: usize,
+    /// Distinct observers counted for one candidate external address.
+    pub max_observers_per_address: usize,
     /// Undelivered network events buffered for the composition root.
     pub event_queue_capacity: usize,
     /// How long a synchronous port call waits for the driver's reply.
@@ -139,6 +143,23 @@ impl ResourceLimits {
         // The total relay budget: 32 concurrent circuits at 8 MiB each bounds
         // what this peer can be made to carry for others.
         max_relay_circuits: 32,
+
+        // An observed address is a *claim by a remote peer about us*, so the
+        // ledger that holds them is fed entirely by untrusted input: a peer
+        // that reports a fresh address on every identify exchange would grow
+        // it without limit. A real peer has a handful of external addresses —
+        // one per family per transport, so four or so — and 16 leaves room for
+        // a multi-homed host and a genuine address change without letting a
+        // hostile peer turn candidate tracking into an allocation lever.
+        max_candidate_addresses: 16,
+
+        // Corroboration needs two distinct observers, so at the shipped
+        // threshold this cap can never bind — which is exactly why it is here.
+        // It is the structural guarantee that a Sybil crowd agreeing on one
+        // address costs a fixed eight peer identities' worth of memory however
+        // many of them show up, and it keeps holding if a later piece raises
+        // the threshold.
+        max_observers_per_address: 8,
 
         // The composition root drains events on its own loop. A queue of 1024
         // absorbs a burst without letting a stalled root grow this process's
