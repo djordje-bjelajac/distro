@@ -4,7 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Current state
 
-The repository contains only agent scaffolding — `AGENTS.md`, `.codex/agents/`, `.agents/skills/`, and the `.claude/` mirror of both. There is no Cargo workspace, `src/`, `tests/`, or `docs/` yet. The structure below is the **target** layout to create as code lands, not something already on disk. Verify a path exists before assuming it.
+The workspace is implemented and green: `Cargo.toml`, `src/shared_types/`, three context crates under `src/contexts/`, three infrastructure crates under `src/infrastructure/`, the `src/app/` composition root and TUI binary, `tests/integration/`, and `docs/specs/`. All four gates pass. The layout below is what is on disk, not a target.
+
+The product is a serverless peer-to-peer text messaging system: every instance is equal, joins without a server, and reaches the network via cached peers → LAN mDNS → a pasted join ticket. `docs/specs/0002-peer-to-peer-communication-canvas.md` is the approved REASONS canvas and the implementation source of truth, with every amendment recorded inline and dated.
 
 `AGENTS.md` is the authoritative contributor guide. Keep this file consistent with it; when they conflict, `AGENTS.md` wins.
 
@@ -27,6 +29,8 @@ Run the narrowest relevant check after each change; run all four before declarin
 ## Architecture
 
 Rust Cargo workspace applying DDD, hexagonal architecture, CQRS, and TDD. One bounded context per crate under `src/contexts/<context>/`, with shared contracts in `src/shared_types/`, technical implementations in `src/infrastructure/`, integration tests in `tests/integration/`, and decision records in `docs/`.
+
+`src/app/` is the composition root — one binary crate wiring every context to its adapters, plus the terminal interface. It belongs to no context, depends on everything, and **nothing depends on it**. It contains no domain rule: if wiring something would require a rule that does not exist, that is a canvas gap to surface, not a decision to take in the root. It must never depend on `src/infrastructure/sim_net/`, which is test infrastructure.
 
 Each context crate:
 

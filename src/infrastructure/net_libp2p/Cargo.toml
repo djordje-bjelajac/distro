@@ -4,7 +4,71 @@ version.workspace = true
 edition.workspace = true
 publish.workspace = true
 
+# Every third-party dependency of this crate is declared here with a concrete
+# version rather than in `[workspace.dependencies]`. None of them is used by any
+# other crate — that is canvas D2's containment rule made structural: `libp2p`,
+# `tokio`, and `ciborium` stop at this boundary, and a workspace-level entry
+# would advertise them to crates that must never name them.
 [dependencies]
+shared-types.workspace = true
+membership.workspace = true
+messaging.workspace = true
+
+# The P2P stack (D2). Feature set is exactly the canvas §5/OP-10 list; nothing
+# that would contact a host somebody else operates is enabled — in particular
+# `dns` is off, so no resolver is consulted and every endpoint is a literal
+# address a peer told us about (S1).
+libp2p = { version = "0.56.0", default-features = false, features = [
+    "tokio",
+    "quic",
+    "tcp",
+    "noise",
+    "yamux",
+    "identify",
+    "kad",
+    "mdns",
+    "autonat",
+    "relay",
+    "dcutr",
+    "gossipsub",
+    "request-response",
+    "macros",
+    # Not a transport choice: with secp256k1 compiled in, a peer that presents
+    # a non-Ed25519 identity is *recognised and refused by name*
+    # (`PeerIdMappingError::NotEd25519`) instead of being indistinguishable
+    # from a corrupt key. Every identity this network issues is Ed25519 (D5).
+    "secp256k1",
+] }
+
+# The async runtime the swarm is driven on. The ports are synchronous, so the
+# runtime never appears in a port signature: see `runtime::NetworkHandle` for
+# the seam.
+tokio = { version = "1.48.0", default-features = false, features = [
+    "rt",
+    "rt-multi-thread",
+    "sync",
+    "time",
+    "net",
+    "io-util",
+    "macros",
+] }
+futures = "0.3.31"
+# `request_response::Codec` is an `#[async_trait]` trait, so an implementation
+# has to use the same attribute macro.
+async-trait = "0.1.89"
+
+# Envelope and join-ticket encoding (D6): self-describing, named fields,
+# unknown-field tolerant.
+ciborium = "0.2.2"
+
+# Copy-pasteable join-ticket text (D1). URL-safe alphabet so a ticket survives
+# a chat client, an email, and a double-click selection intact.
+base64 = "0.22.1"
+
+# AutoNAT v2 draws random nonces for its probes; the crate takes the RNG as a
+# parameter rather than reaching for one.
+rand = "0.8.5"
+
 
 [lints]
 workspace = true

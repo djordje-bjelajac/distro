@@ -4,11 +4,11 @@ use shared_types::Envelope;
 
 use crate::application::commands::{
     AcceptInboundMessage, AcceptInboundMessageHandler, CloseAgedGaps, CloseAgedGapsHandler,
-    MarkMessageDelivered, MarkMessageDeliveredHandler,
+    MarkMessageDelivered, MarkMessageDeliveredHandler, MarkMessageFailed, MarkMessageFailedHandler,
 };
 use crate::application::{ConversationRegistry, MessageRecorder, MessagingSettings};
-use crate::domain::MessageId;
 use crate::domain::events::{MessageDeliveryStateChanged, MessageGapClosed};
+use crate::domain::{DeliveryFailure, MessageId};
 use crate::ports::{
     AuthorPolicyPort, ClockPort, EnvelopeVerifierPort, InboundEnvelopePort, InboundVerdict,
     MessagingCommandError,
@@ -19,16 +19,18 @@ use crate::ports::{
 /// and its clock tick drive (S3).
 ///
 /// Every method here is a *report* — an envelope arrived, a recipient
-/// acknowledged, a tolerance window elapsed — never a decision. The decisions
-/// are [`SendMessagePort`](crate::ports::SendMessagePort)'s.
+/// acknowledged, a transport gave up, a tolerance window elapsed — never a
+/// decision. The decisions are
+/// [`SendMessagePort`](crate::ports::SendMessagePort)'s.
 ///
-/// The three belong together because they are the three ways an inbound story
-/// ends: the message arrived, the acknowledgement arrived, or nothing arrived
-/// and the wait is over.
+/// The four belong together because they are the four ways a story the network
+/// is telling ends: the message arrived, the acknowledgement arrived, the
+/// refusal arrived, or nothing arrived and the wait is over.
 #[derive(Clone)]
 pub struct InboundEnvelopeService {
     accept: AcceptInboundMessageHandler,
     delivered: MarkMessageDeliveredHandler,
+    failed: MarkMessageFailedHandler,
     close_gaps: CloseAgedGapsHandler,
 }
 
@@ -51,6 +53,7 @@ impl InboundEnvelopeService {
                 recorder.clone(),
             ),
             delivered: MarkMessageDeliveredHandler::new(Arc::clone(&registry), recorder.clone()),
+            failed: MarkMessageFailedHandler::new(Arc::clone(&registry), recorder.clone()),
             close_gaps: CloseAgedGapsHandler::new(registry, settings, clock, recorder),
         }
     }
@@ -66,6 +69,14 @@ impl InboundEnvelopePort for InboundEnvelopeService {
         id: MessageId,
     ) -> Result<MessageDeliveryStateChanged, MessagingCommandError> {
         self.delivered.handle(MarkMessageDelivered { id })
+    }
+
+    fn message_delivery_failed(
+        &self,
+        id: MessageId,
+        reason: DeliveryFailure,
+    ) -> Result<MessageDeliveryStateChanged, MessagingCommandError> {
+        self.failed.handle(MarkMessageFailed { id, reason })
     }
 
     fn close_aged_gaps(&self) -> Result<Vec<MessageGapClosed>, MessagingCommandError> {

@@ -4,6 +4,8 @@
 
 This Rust Cargo workspace follows DDD, hexagonal architecture, CQRS, and TDD. Model each bounded context as one crate under `src/contexts/<context>/`. Keep shared contracts in `src/shared_types/`, technical implementations in `src/infrastructure/`, integration tests in `tests/integration/`, and decisions in `docs/`.
 
+`src/app/` is the composition root: the single binary crate that wires every context to its adapters and hosts the terminal interface. It belongs to no context, so it sits beside them rather than inside one. It depends on everything and **nothing depends on it**; it holds no domain rule of its own, and it never links test infrastructure such as `src/infrastructure/sim_net/`.
+
 Each context crate should use this layout:
 
 ```text

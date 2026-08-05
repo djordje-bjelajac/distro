@@ -29,6 +29,9 @@ mod inbound_envelope_service;
 mod mark_message_delivered;
 #[cfg(test)]
 mod mark_message_delivered_test;
+mod mark_message_failed;
+#[cfg(test)]
+mod mark_message_failed_test;
 mod open_direct_conversation;
 mod outbound_composer;
 mod peer_lifecycle_service;
@@ -47,6 +50,7 @@ pub use close_aged_gaps::{CloseAgedGaps, CloseAgedGapsHandler};
 pub use fail_pending_directs::{FailPendingDirects, FailPendingDirectsHandler};
 pub use inbound_envelope_service::InboundEnvelopeService;
 pub use mark_message_delivered::{MarkMessageDelivered, MarkMessageDeliveredHandler};
+pub use mark_message_failed::{MarkMessageFailed, MarkMessageFailedHandler};
 pub use open_direct_conversation::{OpenDirectConversation, OpenDirectConversationHandler};
 pub use peer_lifecycle_service::PeerLifecycleService;
 pub use publish_broadcast_message::{PublishBroadcastMessage, PublishBroadcastMessageHandler};

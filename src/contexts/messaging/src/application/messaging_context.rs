@@ -94,8 +94,8 @@ impl MessagingContext {
         &self.send
     }
 
-    /// The inbound port for reports: arriving envelopes, acknowledgements, and
-    /// the gap sweep.
+    /// The inbound port for reports: arriving envelopes, acknowledgements,
+    /// delivery refusals, and the gap sweep.
     pub const fn inbound(&self) -> &InboundEnvelopeService {
         &self.inbound
     }

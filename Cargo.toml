@@ -8,6 +8,7 @@ members = [
     "src/infrastructure/net_libp2p",
     "src/infrastructure/store_fs",
     "src/infrastructure/sim_net",
+    "src/app",
     "tests/integration",
 ]
 
@@ -26,6 +27,7 @@ infra-store-fs = { path = "src/infrastructure/store_fs" }
 infra-sim-net = { path = "src/infrastructure/sim_net" }
 
 ed25519-dalek = "2"
+getrandom = "0.2"
 sha2 = "0.10"
 
 [workspace.lints.rust]
