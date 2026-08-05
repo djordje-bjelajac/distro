@@ -64,5 +64,5 @@ pub use runtime::{
     NetworkConfig, NetworkEvents, NetworkHandle, NetworkIdentity, NetworkIdentityError,
     NetworkRuntime, NetworkStartError,
 };
-pub use swarm::{DirectMessageFailure, NetworkEvent};
+pub use swarm::{DirectMessageFailure, NetworkEvent, Reachability};
 pub use ticket::{JoinTicketCodec, JoinTicketCodecError};

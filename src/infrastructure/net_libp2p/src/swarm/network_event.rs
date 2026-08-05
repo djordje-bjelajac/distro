@@ -2,6 +2,8 @@ use membership::domain::Endpoint;
 use membership::ports::DiscoveredPeer;
 use shared_types::{Envelope, EnvelopeSignature, PeerId};
 
+use crate::swarm::reachability_ledger::Reachability;
+
 /// Everything the network reports upward, in this crate's own vocabulary.
 ///
 /// # Why this is an enum and not a set of port calls
@@ -26,6 +28,26 @@ pub enum NetworkEvent {
     /// peer's AutoNAT probe. → re-`announce`, since this is the first moment a
     /// NAT-ed peer has a truthful address to publish.
     ExternalAddressConfirmed(Endpoint),
+
+    /// The answer to "can strangers dial me" moved. → **no port call at all**;
+    /// the composition root holds the latest value and shows it (canvas OP-2).
+    ///
+    /// The one variant that maps onto no inbound port, and deliberately: this
+    /// is a fact about *this process's* network position, not about any peer,
+    /// any message, or any session, so no context owns it (D5). It is also
+    /// report-only — nothing downstream may change a dial, a relay
+    /// reservation, or an address selection on the strength of it (D4, S5).
+    /// libp2p already prefers a confirmed direct address and falls back to a
+    /// circuit; second-guessing that from here would duplicate the logic with
+    /// worse information.
+    ///
+    /// Emitted only on an actual transition, so a root is not woken by the
+    /// steady state of a healthy peer being re-probed on a timer.
+    /// [`Reachability::Unknown`] is the value before any probe has concluded
+    /// and **is not** [`Reachability::Unreachable`]; a renderer that treated
+    /// them alike would show every peer an alarming, false claim during every
+    /// startup (S3).
+    ReachabilityChanged(Reachability),
 
     /// A discovery mechanism saw a peer. → `InboundSessionPort::peer_observed`.
     ///

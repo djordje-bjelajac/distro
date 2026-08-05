@@ -24,5 +24,9 @@ pub(crate) mod network_driver;
 #[cfg(test)]
 mod network_driver_test;
 mod network_event;
+pub(crate) mod reachability_ledger;
+#[cfg(test)]
+mod reachability_ledger_test;
 
 pub use network_event::{DirectMessageFailure, NetworkEvent};
+pub use reachability_ledger::Reachability;

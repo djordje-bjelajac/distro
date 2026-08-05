@@ -54,6 +54,8 @@ pub struct ResourceLimits {
     pub max_candidate_addresses: usize,
     /// Distinct observers counted for one candidate external address.
     pub max_observers_per_address: usize,
+    /// Addresses failed AutoNAT probes are remembered for.
+    pub max_failing_addresses: usize,
     /// Undelivered network events buffered for the composition root.
     pub event_queue_capacity: usize,
     /// How long a synchronous port call waits for the driver's reply.
@@ -160,6 +162,22 @@ impl ResourceLimits {
         // many of them show up, and it keeps holding if a later piece raises
         // the threshold.
         max_observers_per_address: 8,
+
+        // The failure half of reachability, and the mirror of the cap above.
+        // An AutoNAT probe result is a *remote server's report about us*, for
+        // an address libp2p picked out of the candidate pool that any peer can
+        // add to, so the ledger holding those reports is fed by untrusted input
+        // exactly as the candidate ledger is. Sixteen is the same number for
+        // the same reason: a real peer has a handful of external addresses, and
+        // a hostile one must not be able to turn failure evidence into an
+        // allocation lever.
+        //
+        // One number is enough here where the candidate ledger needed two,
+        // because an address is condemned the moment it reaches the
+        // corroboration threshold and then stops taking evidence — so the
+        // servers held per address are capped by the threshold itself, and
+        // capping the addresses caps the whole structure.
+        max_failing_addresses: 16,
 
         // The composition root drains events on its own loop. A queue of 1024
         // absorbs a burst without letting a stalled root grow this process's

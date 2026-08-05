@@ -1,4 +1,5 @@
-//! What the driver does with an external-address candidate.
+//! What the driver does with an external-address candidate, and with an
+//! AutoNAT probe report.
 //!
 //! # Why this test drives the driver rather than two real swarms
 //!
@@ -13,23 +14,42 @@
 //! order libp2p guarantees — is what makes the rule observable. The swarm is
 //! real and built by the same `build_swarm` production uses; only the events
 //! are supplied, and every one of them is a shape identify actually emits.
+//!
+//! # The same applies, harder, to the AutoNAT verdict
+//!
+//! The reachability tests below share this file for the same reason and one
+//! more: **no automated test anywhere can prove real unreachability** (canvas
+//! S4). A loopback pair has no NAT to fail behind, and `infra-sim-net` has no
+//! concept of a public address. Worse, `autonat::v2::client::Error` has a
+//! private field and no public constructor, so a *failing* `client::Event`
+//! cannot be built here at all. What follows proves the logic and the wiring —
+//! that a supplied success reaches `NetworkEvent::ReachabilityChanged`, and
+//! that failures are corroborated before they condemn. It does not prove that a
+//! genuinely unreachable peer says so; that is the two-machine smoke of system
+//! canvas OP-13, which has not been run.
 
 use std::sync::mpsc::{Receiver, TryRecvError, sync_channel};
 
 use libp2p::gossipsub::IdentTopic;
 use libp2p::identity::Keypair;
 use libp2p::swarm::{ConnectionId, SwarmEvent};
-use libp2p::{Multiaddr, PeerId as Libp2pPeerId, identify};
-use membership::domain::Reachability;
+use libp2p::{Multiaddr, PeerId as Libp2pPeerId, autonat, identify};
+// Two different questions share this name: the domain's is a property of one
+// *address* (direct or relayed), this crate's is a property of *this peer's*
+// position on the network. Aliased rather than qualified so neither reads as
+// the other.
+use membership::domain::Reachability as EndpointReachability;
 use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
 
 use crate::codec::{CodecDiagnostics, EnvelopeCodec};
+use crate::mapping::EndpointMapping;
 use crate::runtime::network_runtime::build_swarm;
 use crate::runtime::{NetworkConfig, NetworkIdentity};
 use crate::swarm::NetworkEvent;
 use crate::swarm::distro_behaviour::DistroBehaviourEvent;
 use crate::swarm::network_command::NetworkCommand;
 use crate::swarm::network_driver::NetworkDriver;
+use crate::swarm::reachability_ledger::{ProbeResult, Reachability};
 use crate::test_peers::ALICE_SECRET_KEY;
 
 /// A globally routable address, from RFC 5737's documentation range so nothing
@@ -116,6 +136,38 @@ impl Harness {
             .handle_swarm_event(SwarmEvent::NewExternalAddrCandidate {
                 address: address(candidate),
             });
+    }
+
+    /// Hands the driver a successful AutoNAT probe report, in the shape
+    /// `autonat::v2::client` emits it — a real `DistroBehaviourEvent` through
+    /// the real `handle_swarm_event`, so the match arm is what routes it.
+    fn probe_succeeded(&mut self, server: &Keypair, tested: &str) {
+        self.driver
+            .handle_swarm_event(SwarmEvent::Behaviour(DistroBehaviourEvent::AutonatClient(
+                autonat::v2::client::Event {
+                    tested_addr: address(tested),
+                    // Whatever the server had to send to run the test. Nothing
+                    // reads it, and it is populated to keep the fixture the
+                    // shape libp2p actually produces.
+                    bytes_sent: 30_000,
+                    server: server.public().to_peer_id(),
+                    result: Ok(()),
+                },
+            )));
+    }
+
+    /// Hands the driver a failed AutoNAT probe report.
+    ///
+    /// Not a supplied `SwarmEvent`, and it cannot be one:
+    /// `autonat::v2::client::Error` has a private field and no constructor, so
+    /// `Err(..)` is unconstructible outside `libp2p-autonat`. This enters at the
+    /// method the match arm calls, one step further in.
+    fn probe_failed(&mut self, server: &Keypair, tested: &str) {
+        self.driver.probe_reported(
+            server.public().to_peer_id(),
+            &address(tested),
+            ProbeResult::Failed,
+        );
     }
 
     /// Every event the driver has pushed so far.
@@ -223,7 +275,7 @@ fn two_distinct_peers_reporting_one_public_address_confirm_it() {
     };
     assert_eq!(
         endpoint.reachability(),
-        Reachability::Direct,
+        EndpointReachability::Direct,
         "a corroborated address is one a stranger dials directly"
     );
 
@@ -373,6 +425,153 @@ fn the_candidate_arm_never_reads_the_observed_address_identify_reported() {
         confirmed_addresses(&harness.drain()),
         vec![PUBLIC.to_owned()]
     );
+}
+
+/// The verdict a peer proven reachable at `text` should report.
+fn reachable_at(text: &str) -> Reachability {
+    Reachability::Reachable(EndpointMapping::parse(text).expect("a well-formed multiaddress"))
+}
+
+/// Every reachability verdict the driver has pushed, in order.
+fn verdicts(events: &[NetworkEvent]) -> Vec<Reachability> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            NetworkEvent::ReachabilityChanged(reachability) => Some(reachability.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn a_successful_probe_reaches_the_composition_root_as_reachable() {
+    // P2-1 and P2-5 through the arm this piece adds: a real
+    // `DistroBehaviourEvent::AutonatClient` carrying `Ok(())`, delivered through
+    // the same `handle_swarm_event` libp2p calls, arrives at the root as a
+    // verdict naming the address that was tested.
+    let mut harness = harness_or_skip!();
+
+    harness.probe_succeeded(&keypair(1), PUBLIC);
+
+    let events = harness.drain();
+    assert_eq!(verdicts(&events), vec![reachable_at(PUBLIC)]);
+    assert!(
+        confirmed_addresses(&events).is_empty(),
+        "the confirmation path is libp2p's own `ExternalAddrConfirmed`, not this arm (D1)"
+    );
+}
+
+#[test]
+fn a_single_failed_probe_reports_nothing_at_all() {
+    // **The asymmetry at the driver level (S2), and the point of the piece.**
+    // The failure is counted, so it is not invisible — and it produces no
+    // verdict, so a user is never told they are unreachable on one server's
+    // word.
+    let mut harness = harness_or_skip!();
+
+    harness.probe_failed(&keypair(1), PUBLIC);
+
+    assert_eq!(harness.diagnostics.probes_run(), 1);
+    assert_eq!(harness.diagnostics.probes_failed(), 1);
+    assert!(
+        verdicts(&harness.drain()).is_empty(),
+        "still Unknown, and Unknown is reported by saying nothing (S3)"
+    );
+}
+
+#[test]
+fn two_distinct_servers_failing_report_unreachable_exactly_once() {
+    // P2-2 and P2-4 through the driver. The second distinct server is what
+    // turns evidence into a verdict, and further failures add nothing — the
+    // root is not woken by a state it already holds.
+    let mut harness = harness_or_skip!();
+
+    harness.probe_failed(&keypair(1), PUBLIC);
+    assert!(verdicts(&harness.drain()).is_empty());
+
+    harness.probe_failed(&keypair(2), PUBLIC);
+    assert_eq!(
+        verdicts(&harness.drain()),
+        vec![Reachability::Unreachable],
+        "two distinct servers agreeing is the bar (D2)"
+    );
+
+    for seed in 3..=8 {
+        harness.probe_failed(&keypair(seed), PUBLIC);
+    }
+    assert!(verdicts(&harness.drain()).is_empty());
+}
+
+#[test]
+fn one_server_failing_repeatedly_never_reports_unreachable() {
+    // A broken, overloaded, or hostile server, asked eight times. Corroboration
+    // counts distinct servers; if it counted reports, this peer would condemn
+    // itself on one peer's say-so.
+    let mut harness = harness_or_skip!();
+
+    for _ in 0..8 {
+        harness.probe_failed(&keypair(1), PUBLIC);
+    }
+
+    assert_eq!(harness.diagnostics.probes_failed(), 8);
+    assert!(verdicts(&harness.drain()).is_empty());
+}
+
+#[test]
+fn a_success_after_unreachable_reports_reachable_again() {
+    // P2-7 at the driver level: the verdict is not a one-way latch, and the
+    // return trip reaches the root over the same channel.
+    let mut harness = harness_or_skip!();
+    harness.probe_failed(&keypair(1), PUBLIC);
+    harness.probe_failed(&keypair(2), PUBLIC);
+    assert_eq!(verdicts(&harness.drain()), vec![Reachability::Unreachable]);
+
+    harness.probe_succeeded(&keypair(3), PUBLIC);
+
+    assert_eq!(verdicts(&harness.drain()), vec![reachable_at(PUBLIC)]);
+}
+
+#[test]
+fn every_probe_is_counted_exactly_once_and_the_totals_agree() {
+    // P2-6. Reachability's failure mode is silence, so the counters matter as
+    // much as the state: `run` is the number of probes another peer reported on,
+    // and it must equal the successes plus the failures or one of the three is
+    // being incremented on the wrong path.
+    let mut harness = harness_or_skip!();
+
+    harness.probe_succeeded(&keypair(1), PUBLIC);
+    harness.probe_failed(&keypair(2), PUBLIC);
+    harness.probe_failed(&keypair(3), PUBLIC);
+    harness.probe_succeeded(&keypair(4), PUBLIC);
+
+    assert_eq!(harness.diagnostics.probes_run(), 4);
+    assert_eq!(harness.diagnostics.probes_succeeded(), 2);
+    assert_eq!(harness.diagnostics.probes_failed(), 2);
+    assert_eq!(
+        harness.diagnostics.probes_run(),
+        harness.diagnostics.probes_succeeded() + harness.diagnostics.probes_failed()
+    );
+}
+
+#[test]
+fn a_probe_report_does_not_disturb_the_external_address_ledger() {
+    // S5 and the piece-1 boundary: this arm reports, and changes nothing about
+    // which addresses are advertised. A probe arriving between an identify
+    // exchange and its candidate also closes the attribution window, exactly as
+    // any other swarm event does — it is not special-cased into it.
+    let mut harness = harness_or_skip!();
+
+    harness.identify_then_candidate(&keypair(1), PUBLIC);
+    harness.probe_succeeded(&keypair(2), PUBLIC);
+
+    assert_eq!(harness.diagnostics.external_candidates_seen(), 1);
+    assert_eq!(harness.diagnostics.external_candidates_recorded(), 1);
+    assert_eq!(
+        harness.diagnostics.external_addresses_promoted(),
+        0,
+        "a probe is not an observation, and does not corroborate one"
+    );
+    assert!(confirmed_addresses(&harness.drain()).is_empty());
 }
 
 /// The observer this crate maps a keypair to, used only to keep the fixtures

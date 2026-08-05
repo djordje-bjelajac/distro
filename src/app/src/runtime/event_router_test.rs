@@ -1,6 +1,6 @@
 use std::sync::{Arc, Mutex};
 
-use infra_net_libp2p::swarm::{DirectMessageFailure, NetworkEvent};
+use infra_net_libp2p::swarm::{DirectMessageFailure, NetworkEvent, Reachability};
 use membership::domain::events::PeerPresenceExpired;
 use membership::domain::{Endpoint, JoinTicket, SessionOutcome};
 use membership::ports::{
@@ -623,6 +623,98 @@ fn a_failure_for_an_unknown_signature_marks_nothing_and_is_still_stated() {
             .iter()
             .any(|notice| notice.text.contains("not delivered")),
         "a failure the user cannot see is silent loss"
+    );
+}
+
+#[test]
+fn nothing_probed_yet_is_unknown_and_is_not_unreachable() {
+    // Startup, before any probe has concluded. S3: `Unknown` and `Unreachable`
+    // are different facts, and a root that started life at `Unreachable` would
+    // put a false verdict on screen during every launch.
+    let harness = harness();
+
+    assert_eq!(harness.diagnostics.reachability(), Reachability::Unknown);
+    assert_ne!(
+        harness.diagnostics.reachability(),
+        Reachability::Unreachable
+    );
+}
+
+#[test]
+fn a_reachability_verdict_is_held_and_calls_no_port_at_all() {
+    // The one variant that maps onto no inbound port (canvas D5): a fact about
+    // this process's position on the network, owned by no context.
+    let harness = harness();
+    let endpoint = endpoint("/ip4/203.0.113.7/tcp/4001");
+
+    harness
+        .router
+        .route(NetworkEvent::ReachabilityChanged(Reachability::Reachable(
+            endpoint.clone(),
+        )));
+
+    assert!(harness.recorder.calls().is_empty());
+    assert_eq!(
+        harness.diagnostics.reachability(),
+        Reachability::Reachable(endpoint)
+    );
+}
+
+#[test]
+fn a_verdict_changes_no_behaviour_it_only_reports() {
+    // D4/S5: the verdict reports and libp2p decides. Nothing here announces,
+    // dials, or touches the address set — an `Unreachable` peer that started
+    // re-announcing or stopped advertising an address would be this piece
+    // changing connectivity on evidence it explicitly does not trust that far.
+    let harness = harness();
+    harness
+        .router
+        .route(NetworkEvent::ListeningOn(endpoint("/ip4/10.0.0.1/tcp/1")));
+
+    harness
+        .router
+        .route(NetworkEvent::ReachabilityChanged(Reachability::Unreachable));
+
+    assert!(harness.recorder.calls().is_empty(), "no port was called");
+    assert_eq!(
+        harness.endpoints.all(),
+        vec![endpoint("/ip4/10.0.0.1/tcp/1")],
+        "the announced address set is untouched"
+    );
+    assert!(harness.notices.all().is_empty());
+    assert_eq!(harness.diagnostics.port_refusals(), 0);
+}
+
+#[test]
+fn the_latest_verdict_is_the_one_held() {
+    // The event fires only on a transition, so what last arrived is what is
+    // true now — including the return to `Reachable` that P2-7 requires not be
+    // a one-way latch.
+    let harness = harness();
+    let endpoint = endpoint("/ip4/203.0.113.7/tcp/4001");
+
+    harness
+        .router
+        .route(NetworkEvent::ReachabilityChanged(Reachability::Reachable(
+            endpoint.clone(),
+        )));
+    harness
+        .router
+        .route(NetworkEvent::ReachabilityChanged(Reachability::Unreachable));
+    assert_eq!(
+        harness.diagnostics.reachability(),
+        Reachability::Unreachable
+    );
+
+    harness
+        .router
+        .route(NetworkEvent::ReachabilityChanged(Reachability::Reachable(
+            endpoint.clone(),
+        )));
+
+    assert_eq!(
+        harness.diagnostics.reachability(),
+        Reachability::Reachable(endpoint)
     );
 }
 

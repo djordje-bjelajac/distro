@@ -215,6 +215,24 @@ impl EventRouter {
                     }
                 }
             }
+
+            // → nothing. The one variant that maps onto no inbound port at
+            // all, and deliberately: this is a fact about *this process's*
+            // position on the network, not about a peer, a message, or a
+            // session, so no context owns it (reachability canvas D5). It is
+            // held for the status line and that is the entire effect it has —
+            // nothing here dials, announces, reserves a relay, or changes an
+            // address selection on the strength of it (D4, S5). libp2p already
+            // prefers a confirmed direct address and falls back to a circuit;
+            // second-guessing that from the root would duplicate the logic
+            // with worse information, and would act on evidence this piece
+            // trusts only far enough to *report*.
+            //
+            // Emitted only on a transition, so what arrives is current and
+            // there is nothing here to debounce or age out.
+            NetworkEvent::ReachabilityChanged(reachability) => {
+                self.diagnostics.record_reachability(reachability);
+            }
         }
     }
 

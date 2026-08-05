@@ -121,6 +121,7 @@ impl Frame {
         Self {
             status: StatusLine::build(
                 node.membership().queries().network_status(),
+                &node.diagnostics().reachability(),
                 node.local_peer(),
                 &display_name,
                 selected.map_or("broadcast", |entry| entry.label.as_str()),
@@ -186,6 +187,19 @@ fn diagnostics_of(node: &Arc<Node>) -> Vec<(String, u64)> {
             local.uncorrelated_reports(),
         ),
         ("port refusals".to_owned(), local.port_refusals()),
+        // The evidence behind whatever the status line says about reachability
+        // (P2-6). Its own failure mode is silence — a peer nobody ever probed
+        // reads exactly like a peer waiting for a verdict — and only these
+        // numbers tell the two apart.
+        ("reachability probes run".to_owned(), codec.probes_run()),
+        (
+            "reachability probes succeeded".to_owned(),
+            codec.probes_succeeded(),
+        ),
+        (
+            "reachability probes failed".to_owned(),
+            codec.probes_failed(),
+        ),
         // S2's tolerance counters and S6's refusals, which only the adapter
         // can see (AC14).
         (

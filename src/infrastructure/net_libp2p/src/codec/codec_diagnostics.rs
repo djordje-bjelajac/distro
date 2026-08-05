@@ -34,6 +34,9 @@ struct Counters {
     external_candidates_seen: AtomicU64,
     external_candidates_recorded: AtomicU64,
     external_addresses_promoted: AtomicU64,
+    probes_run: AtomicU64,
+    probes_succeeded: AtomicU64,
+    probes_failed: AtomicU64,
 }
 
 impl CodecDiagnostics {
@@ -120,6 +123,41 @@ impl CodecDiagnostics {
             .load(Ordering::Relaxed)
     }
 
+    /// AutoNAT probes another peer ran against an address of this one and
+    /// reported the result of, successes and failures together (P2-6).
+    ///
+    /// # Why the probe counts matter as much as the verdict
+    ///
+    /// Reachability's own failure mode is silence. A peer that never learns
+    /// whether it is reachable looks, from the inside, exactly like a peer that
+    /// is reachable and unpopular — both stay [`Unknown`] forever. These three
+    /// numbers are the only way to tell the difference, and read together they
+    /// say where the process stopped: zero run means no connected peer is
+    /// probing us at all, run without succeeded means every dial-back failed,
+    /// and a mix is the ordinary weather of a multi-homed peer whose addresses
+    /// do not all work.
+    ///
+    /// `probes_run` is always `probes_succeeded + probes_failed`; it is counted
+    /// separately rather than derived so that a probe whose address this build
+    /// cannot express is still visible somewhere.
+    ///
+    /// [`Unknown`]: crate::swarm::Reachability::Unknown
+    pub fn probes_run(&self) -> u64 {
+        self.counters.probes_run.load(Ordering::Relaxed)
+    }
+
+    /// Probes whose dial-back arrived. One of these is proof of reachability.
+    pub fn probes_succeeded(&self) -> u64 {
+        self.counters.probes_succeeded.load(Ordering::Relaxed)
+    }
+
+    /// Probes whose dial-back did not arrive. Evidence only: a verdict of
+    /// `Unreachable` needs distinct servers to agree (S2), so this number can
+    /// be large while reachability is still honestly `Unknown`.
+    pub fn probes_failed(&self) -> u64 {
+        self.counters.probes_failed.load(Ordering::Relaxed)
+    }
+
     pub(crate) fn count_tolerated_minor(&self) {
         self.counters
             .tolerated_minor
@@ -178,5 +216,19 @@ impl CodecDiagnostics {
         self.counters
             .external_addresses_promoted
             .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn count_probe_run(&self) {
+        self.counters.probes_run.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn count_probe_succeeded(&self) {
+        self.counters
+            .probes_succeeded
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn count_probe_failed(&self) {
+        self.counters.probes_failed.fetch_add(1, Ordering::Relaxed);
     }
 }

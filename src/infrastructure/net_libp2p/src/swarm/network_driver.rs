@@ -9,7 +9,7 @@ use libp2p::gossipsub::{IdentTopic, PublishError};
 use libp2p::request_response::{Message as RequestResponseMessage, OutboundRequestId};
 use libp2p::swarm::dial_opts::{DialOpts, PeerCondition};
 use libp2p::swarm::{ConnectionId, DialError, Swarm, SwarmEvent};
-use libp2p::{Multiaddr, PeerId as Libp2pPeerId, identify, kad, mdns, request_response};
+use libp2p::{Multiaddr, PeerId as Libp2pPeerId, autonat, identify, kad, mdns, request_response};
 use membership::domain::{Endpoint, SessionDirection};
 use membership::ports::{DiscoveredPeer, PeerDiscoveryError, PeerTransportError};
 use messaging::ports::MessageTransportError;
@@ -25,6 +25,7 @@ use crate::swarm::external_address_ledger::{ExternalAddressLedger, Promotion};
 use crate::swarm::link_registry::LinkRegistry;
 use crate::swarm::network_command::{NetworkCommand, Reply};
 use crate::swarm::network_event::{DirectMessageFailure, NetworkEvent};
+use crate::swarm::reachability_ledger::{ProbeOutcome, ProbeResult, ReachabilityLedger};
 
 /// The one task that owns the swarm.
 ///
@@ -64,6 +65,7 @@ pub(crate) struct NetworkDriver {
     rate_limiter: InboundRateLimiter,
     links: LinkRegistry,
     external_addresses: ExternalAddressLedger,
+    reachability: ReachabilityLedger,
     started_at: Instant,
 
     commands: UnboundedReceiver<NetworkCommand>,
@@ -134,6 +136,7 @@ impl NetworkDriver {
             ),
             links: LinkRegistry::new(local),
             external_addresses,
+            reachability: ReachabilityLedger::new(limits.max_failing_addresses),
             started_at: Instant::now(),
             commands,
             events,
@@ -555,6 +558,51 @@ impl NetworkDriver {
         }
     }
 
+    /// Takes one AutoNAT server's report on one probe of one address.
+    ///
+    /// The decision itself is not here: [`ReachabilityLedger`] holds the
+    /// asymmetry between proof and evidence, the corroboration threshold, and
+    /// the bound, so all three are testable without a NAT and cannot be
+    /// bypassed by a second call site (S2, S3). This method does the two things
+    /// that need the driver — count the probe, and push the verdict onto the
+    /// queue the composition root drains.
+    ///
+    /// # Why this is reachable from the test module
+    ///
+    /// `autonat::v2::client::Error` has a private field and no constructor, so
+    /// a failing `client::Event` cannot be built outside `libp2p-autonat` — and
+    /// a failure is the one thing loopback peers can never produce either (S4).
+    /// The supplied-event test therefore drives the *success* half through
+    /// [`handle_swarm_event`](Self::handle_swarm_event), which proves the match
+    /// arm exists and routes here, and drives the failure half through this
+    /// method, which proves everything downstream of it. The seam is stated
+    /// rather than hidden: nothing between the arm and this call is covered by
+    /// a failing-probe test, and nothing between them does anything.
+    pub(crate) fn probe_reported(
+        &mut self,
+        server: Libp2pPeerId,
+        address: &Multiaddr,
+        result: ProbeResult,
+    ) {
+        // Counted before anything can decline to act on it, so a probe is never
+        // invisible — the failure mode of this whole feature is silence.
+        self.diagnostics.count_probe_run();
+        match result {
+            ProbeResult::Succeeded => self.diagnostics.count_probe_succeeded(),
+            ProbeResult::Failed => self.diagnostics.count_probe_failed(),
+        }
+
+        let Some(endpoint) = endpoint_of(address) else {
+            return;
+        };
+
+        if let ProbeOutcome::Changed(reachability) =
+            self.reachability.record(server, endpoint, result)
+        {
+            self.emit(NetworkEvent::ReachabilityChanged(reachability));
+        }
+    }
+
     fn listener_ready(&mut self, listener: ListenerId, address: Multiaddr) {
         if !self.listening.contains(&address) {
             self.listening.push(address.clone());
@@ -705,6 +753,29 @@ impl NetworkDriver {
                 // and miss candidates from any other source (D1).
                 self.candidate_observer = Some(peer_id);
                 self.record_discovery(peer_id, info.listen_addrs);
+            }
+            DistroBehaviourEvent::AutonatClient(autonat::v2::client::Event {
+                tested_addr,
+                server,
+                result,
+                ..
+            }) => {
+                // The *only* carrier of a failed probe. A success also reaches
+                // this arm, but it is not what makes an address confirmed —
+                // `autonat::v2::client` emits `ToSwarm::ExternalAddrConfirmed`
+                // for that, which the swarm turns into
+                // `SwarmEvent::ExternalAddrConfirmed` and the arm above already
+                // handles. Confirming again from here would announce the same
+                // address twice for one probe (D1).
+                self.probe_reported(
+                    server,
+                    &tested_addr,
+                    if result.is_ok() {
+                        ProbeResult::Succeeded
+                    } else {
+                        ProbeResult::Failed
+                    },
+                );
             }
             DistroBehaviourEvent::Kademlia(kad::Event::RoutingUpdated {
                 peer, addresses, ..
