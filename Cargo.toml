@@ -1,0 +1,33 @@
+[workspace]
+resolver = "3"
+members = [
+    "src/shared_types",
+    "src/contexts/identity",
+    "src/contexts/membership",
+    "src/contexts/messaging",
+    "src/infrastructure/net_libp2p",
+    "src/infrastructure/store_fs",
+    "src/infrastructure/sim_net",
+    "tests/integration",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace.dependencies]
+shared-types = { path = "src/shared_types" }
+identity = { path = "src/contexts/identity" }
+membership = { path = "src/contexts/membership" }
+messaging = { path = "src/contexts/messaging" }
+infra-net-libp2p = { path = "src/infrastructure/net_libp2p" }
+infra-store-fs = { path = "src/infrastructure/store_fs" }
+infra-sim-net = { path = "src/infrastructure/sim_net" }
+
+ed25519-dalek = "2"
+sha2 = "0.10"
+
+[workspace.lints.rust]
+
+[workspace.lints.clippy]

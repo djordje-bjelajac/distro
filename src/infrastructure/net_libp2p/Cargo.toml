@@ -1,0 +1,10 @@
+[package]
+name = "infra-net-libp2p"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true

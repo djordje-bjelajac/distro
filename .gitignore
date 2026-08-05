@@ -2,3 +2,6 @@
 # team, so re-include it here — a global gitignore commonly excludes `.claude`.
 !.claude/
 .claude/settings.local.json
+
+# Cargo build artifacts
+/target
