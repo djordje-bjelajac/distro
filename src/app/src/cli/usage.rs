@@ -117,11 +117,17 @@ WHAT YOU SHOULD KNOW BEFORE JOINING
         format!("{} {}", Self::PROGRAM, env!("CARGO_PKG_VERSION"))
     }
 
-    /// The two disclosures S7 and S8 require, condensed for the UI's help
+    /// The disclosures S7 and S8 require, condensed for the UI's help
     /// overlay — the same facts as the help text, in the space a pane has.
-    pub const DISCLOSURES: [&'static str; 3] = [
+    pub const DISCLOSURES: [&'static str; 4] = [
         "Joining announces your addresses to the network.",
         "Broadcast messages are readable by every member; directs are encrypted end to end.",
         "Two symmetric-NAT peers cannot connect unless a publicly reachable peer is online to relay.",
+        // S8 as amended 2026-08-07 (canvas `0013`). The clipboard is the one
+        // place this build puts a peer's addresses somewhere it does not
+        // control, and on a host running a syncing clipboard manager they
+        // leave the machine entirely — which is what the safeguard used to
+        // say could not happen.
+        "Copying a join ticket puts your addresses on the system clipboard; a syncing clipboard manager will carry them to your other devices.",
     ];
 }

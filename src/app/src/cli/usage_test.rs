@@ -83,3 +83,14 @@ fn the_ui_disclosures_repeat_both_safeguards() {
     assert!(overlay.contains("broadcast messages are readable"));
     assert!(overlay.contains("symmetric-nat"));
 }
+
+/// S8 as amended: the clipboard is the one way this build moves a peer's
+/// addresses off the machine, and a disclosure a user has to read the source
+/// to learn is not a disclosure.
+#[test]
+fn the_ui_disclosures_state_where_a_copied_ticket_can_end_up() {
+    let overlay = Usage::DISCLOSURES.join(" ").to_lowercase();
+
+    assert!(overlay.contains("clipboard"));
+    assert!(overlay.contains("syncing clipboard manager"));
+}
