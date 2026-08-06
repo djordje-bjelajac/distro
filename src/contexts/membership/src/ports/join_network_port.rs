@@ -1,7 +1,10 @@
 use shared_types::PeerId;
 
 use crate::domain::{JoinTicket, SessionOutcome};
-use crate::ports::{EventPublisherError, JoinOutcome, LeaveOutcome, MembershipCommandError};
+use crate::ports::{
+    EventPublisherError, ForgetPeersError, ForgetPeersOutcome, JoinOutcome, LeaveOutcome,
+    MembershipCommandError,
+};
 
 /// The **inbound** (driving) contract for the deliberate decisions this peer
 /// makes about its own membership (canvas §4, inbound column).
@@ -52,4 +55,30 @@ pub trait JoinNetworkPort {
     /// [`PeerRosterError::UnknownPeer`](crate::domain::PeerRosterError::UnknownPeer)
     /// rather than silently ignored.
     fn connect_to_peer(&self, peer: PeerId) -> Result<SessionOutcome, MembershipCommandError>;
+
+    /// Leaves the network and then forgets every peer, so the next launch is a
+    /// genuine cold start.
+    ///
+    /// # It leaves first, and the order is the whole operation
+    ///
+    /// Sessions live *inside* roster entries. Emptying the roster first would
+    /// leave the transport holding every link with nothing left to close them
+    /// by, and the next inbound frame would recreate the entry through
+    /// discovery — the peer the user asked to forget, back within seconds.
+    /// So this closes every session and announces every departure exactly as
+    /// [`leave_network`](Self::leave_network) does, *then* empties the roster,
+    /// *then* writes an empty cache.
+    ///
+    /// The intermediate save that a leave performs is deliberately left in
+    /// place: it buys one code path for "close everything" rather than a
+    /// second, nearly identical one, and the empty write that follows is the
+    /// one that lasts.
+    ///
+    /// # What it does not touch
+    ///
+    /// Trust records, the identity keypair, and the outbound sequence counter
+    /// are all somebody else's, and forgetting a peer is not a reason to
+    /// unblock it, change identity, or go mute. Nothing in this call reaches
+    /// them.
+    fn forget_known_peers(&self) -> Result<ForgetPeersOutcome, ForgetPeersError>;
 }

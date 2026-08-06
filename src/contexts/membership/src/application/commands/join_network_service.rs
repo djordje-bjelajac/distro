@@ -3,14 +3,16 @@ use std::sync::Arc;
 use shared_types::PeerId;
 
 use crate::application::commands::{
-    EstablishSession, EstablishSessionHandler, JoinNetwork, JoinNetworkHandler, LeaveNetwork,
-    LeaveNetworkHandler, OpenSession, OpenSessionHandler,
+    EstablishSession, EstablishSessionHandler, ForgetKnownPeers, ForgetKnownPeersHandler,
+    JoinNetwork, JoinNetworkHandler, LeaveNetwork, LeaveNetworkHandler, OpenSession,
+    OpenSessionHandler,
 };
 use crate::application::{MembershipSettings, MembershipState};
 use crate::domain::{JoinTicket, SessionDirection, SessionOutcome};
 use crate::ports::{
-    ClockPort, EventPublisherError, EventPublisherPort, JoinNetworkPort, JoinOutcome, LeaveOutcome,
-    MembershipCommandError, PeerCachePort, PeerDiscoveryPort, PeerTransportPort,
+    ClockPort, EventPublisherError, EventPublisherPort, ForgetPeersError, ForgetPeersOutcome,
+    JoinNetworkPort, JoinOutcome, LeaveOutcome, MembershipCommandError, PeerCachePort,
+    PeerDiscoveryPort, PeerTransportPort,
 };
 
 /// The decision half of this context's inbound surface: one
@@ -29,6 +31,7 @@ use crate::ports::{
 pub struct JoinNetworkService {
     join_network: JoinNetworkHandler,
     leave_network: LeaveNetworkHandler,
+    forget_known_peers: ForgetKnownPeersHandler,
     open_session: OpenSessionHandler,
     establish_session: EstablishSessionHandler,
 }
@@ -57,8 +60,23 @@ impl JoinNetworkService {
                 Arc::clone(&state),
                 Arc::clone(&clock),
                 Arc::clone(&transport),
-                cache,
+                Arc::clone(&cache),
                 Arc::clone(&publisher),
+            ),
+            // Holds its own leave handler rather than borrowing the one above:
+            // forgetting *is* a leave followed by two more steps, and the
+            // duplication is one `Arc` clone against a shared-mutable-handler
+            // seam nobody would enjoy debugging.
+            forget_known_peers: ForgetKnownPeersHandler::new(
+                Arc::clone(&state),
+                Arc::clone(&cache),
+                LeaveNetworkHandler::new(
+                    Arc::clone(&state),
+                    Arc::clone(&clock),
+                    Arc::clone(&transport),
+                    cache,
+                    Arc::clone(&publisher),
+                ),
             ),
             open_session: OpenSessionHandler::new(
                 Arc::clone(&state),
@@ -88,5 +106,9 @@ impl JoinNetworkPort for JoinNetworkService {
         })?;
 
         self.establish_session.handle(EstablishSession { peer })
+    }
+
+    fn forget_known_peers(&self) -> Result<ForgetPeersOutcome, ForgetPeersError> {
+        self.forget_known_peers.handle(ForgetKnownPeers)
     }
 }

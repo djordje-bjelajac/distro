@@ -36,6 +36,9 @@ mod establish_session_test;
 mod expire_presence;
 #[cfg(test)]
 mod expire_presence_test;
+mod forget_known_peers;
+#[cfg(test)]
+mod forget_known_peers_test;
 mod inbound_session_service;
 mod join_network;
 mod join_network_service;
@@ -58,6 +61,7 @@ mod session_close_cause;
 pub use close_session::{CloseSession, CloseSessionHandler};
 pub use establish_session::{EstablishSession, EstablishSessionHandler};
 pub use expire_presence::{ExpirePresence, ExpirePresenceHandler};
+pub use forget_known_peers::{ForgetKnownPeers, ForgetKnownPeersHandler};
 pub use inbound_session_service::InboundSessionService;
 pub use join_network::{JoinNetwork, JoinNetworkHandler};
 pub use join_network_service::JoinNetworkService;

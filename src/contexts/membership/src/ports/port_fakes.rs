@@ -336,6 +336,14 @@ impl PeerTransportPort for UnusableTransport {
 pub(crate) struct InMemoryPeerCache {
     peers: Mutex<Vec<CachedPeer>>,
     saves: AtomicUsize,
+    /// One entry per write, holding what that write contained.
+    ///
+    /// The final contents are not enough to test forgetting: a handler that
+    /// writes an empty set and *then* a populated one ends up with the wrong
+    /// file, and a handler that writes them the other way round ends up with
+    /// the right one — from the same two writes. Only the order tells them
+    /// apart, and the order is the operation.
+    history: Mutex<Vec<Vec<PeerId>>>,
     probe: Option<Arc<StatusProbe>>,
 }
 
@@ -344,6 +352,7 @@ impl InMemoryPeerCache {
         Self {
             peers: Mutex::new(Vec::new()),
             saves: AtomicUsize::new(0),
+            history: Mutex::new(Vec::new()),
             probe: None,
         }
     }
@@ -352,8 +361,14 @@ impl InMemoryPeerCache {
         Self {
             peers: Mutex::new(peers),
             saves: AtomicUsize::new(0),
+            history: Mutex::new(Vec::new()),
             probe: None,
         }
+    }
+
+    /// Every write so far, in order, as the peer ids it carried.
+    pub(crate) fn write_history(&self) -> Vec<Vec<PeerId>> {
+        guard(&self.history).clone()
     }
 
     /// Samples the network status on every load — the first rung of the
@@ -380,6 +395,7 @@ impl PeerCachePort for InMemoryPeerCache {
 
     fn save(&self, peers: &[CachedPeer]) -> Result<(), PeerCacheError> {
         *guard(&self.peers) = peers.to_vec();
+        guard(&self.history).push(peers.iter().map(|entry| entry.peer).collect());
         self.saves.fetch_add(1, Ordering::Relaxed);
         Ok(())
     }

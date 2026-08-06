@@ -38,6 +38,9 @@ mod discovery_outcome;
 mod event_publisher_port;
 #[cfg(test)]
 mod event_publisher_port_test;
+mod forget_peers_outcome;
+#[cfg(test)]
+mod forget_peers_outcome_test;
 mod inbound_session_port;
 mod join_diagnostic;
 #[cfg(test)]
@@ -73,6 +76,7 @@ pub use clock_port::ClockPort;
 pub use discovered_peer::DiscoveredPeer;
 pub use discovery_outcome::DiscoveryOutcome;
 pub use event_publisher_port::{EventPublisherError, EventPublisherPort};
+pub use forget_peers_outcome::{ForgetPeersError, ForgetPeersOutcome};
 pub use inbound_session_port::InboundSessionPort;
 pub use join_diagnostic::JoinDiagnostic;
 pub use join_network_port::JoinNetworkPort;
