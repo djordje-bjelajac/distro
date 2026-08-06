@@ -29,6 +29,7 @@ use crate::swarm::link_registry::LinkRegistry;
 use crate::swarm::network_command::{NetworkCommand, Reply};
 use crate::swarm::network_event::{DirectMessageFailure, NetworkEvent};
 use crate::swarm::reachability_ledger::{ProbeOutcome, ProbeResult, ReachabilityLedger};
+use crate::swarm::sighting_ledger::{SIGHTING_RETENTION, SightingLedger};
 
 /// The one task that owns the swarm.
 ///
@@ -84,7 +85,9 @@ pub(crate) struct NetworkDriver {
     pending_listen: Option<PendingListen>,
     pending_dials: HashMap<Libp2pPeerId, Vec<PendingDial>>,
     known_addresses: HashMap<Libp2pPeerId, Vec<Multiaddr>>,
-    observed: Vec<DiscoveredPeer>,
+    /// What discovery has seen recently, bounded and aged rather than drained
+    /// (canvas `0010` D12 — the rule and its reasons live on the type).
+    sightings: SightingLedger,
     announced: Vec<Multiaddr>,
     outbound_direct: HashMap<OutboundRequestId, (PeerId, EnvelopeSignature)>,
 }
@@ -148,7 +151,7 @@ impl NetworkDriver {
             pending_listen: None,
             pending_dials: HashMap::new(),
             known_addresses: HashMap::new(),
-            observed: Vec::new(),
+            sightings: SightingLedger::new(limits.max_observed_peers, SIGHTING_RETENTION),
             announced: Vec::new(),
             outbound_direct: HashMap::new(),
         }
@@ -169,7 +172,13 @@ impl NetworkDriver {
 
     // ------------------------------------------------------------- commands
 
-    fn handle_command(&mut self, command: NetworkCommand) {
+    /// Takes one command off the channel.
+    ///
+    /// `pub(crate)` for the same reason
+    /// [`handle_swarm_event`](Self::handle_swarm_event) is: the supplied-event
+    /// test drives the real arm rather than a rehearsal of it, so a command
+    /// that stopped being routed here would fail a test instead of going quiet.
+    pub(crate) fn handle_command(&mut self, command: NetworkCommand) {
         match command {
             NetworkCommand::Listen { reply } => self.start_listening(reply),
             NetworkCommand::Dial {
@@ -180,7 +189,11 @@ impl NetworkDriver {
             NetworkCommand::CloseSession { peer, reply } => self.close_session(peer, &reply),
             NetworkCommand::Announce { endpoints, reply } => self.announce(&endpoints, &reply),
             NetworkCommand::ObservePeers { reply } => {
-                answer(&reply, Ok(std::mem::take(&mut self.observed)));
+                // Reading is a question, not a withdrawal (D12). What was seen
+                // is still there for the next join to try; the ledger drops it
+                // when it goes stale, never when it is looked at.
+                let now = self.elapsed_millis();
+                answer(&reply, Ok(self.sightings.observed(now)));
             }
             NetworkCommand::RedeemTicket { ticket, reply } => self.redeem(*ticket, reply),
             NetworkCommand::SendDirect {
@@ -411,6 +424,23 @@ impl NetworkDriver {
         answer(reply, Ok(()));
     }
 
+    /// Releases one frame to the broadcast topic, and says which of the two
+    /// things that can honestly mean actually happened.
+    ///
+    /// # Reaching nobody is a state, not a failure — and not silence either
+    ///
+    /// A peer alone on the network is `Isolated`, which is a normal status; so
+    /// publishing with nobody subscribed must not be an `Err` that a caller has
+    /// to treat as a fault, and the port keeps returning `Ok` for it. But `Ok`
+    /// on its own made `→ published` read identically whether the message
+    /// reached five peers or vanished (canvas `0010` D11), which is the same
+    /// silent-loss non-state AC11 refuses for direct messages.
+    ///
+    /// So the two outcomes are separated *here*, where the difference is
+    /// actually known, and counted: `broadcasts_propagated` against
+    /// `broadcasts_reaching_nobody`. Only gossipsub can tell them apart — above
+    /// this line there is one `Result<(), MessageTransportError>` and no room
+    /// in it for a third answer.
     fn publish_broadcast(&mut self, frame: Vec<u8>, reply: &Reply<(), MessageTransportError>) {
         if frame.len() > self.limits.max_envelope_bytes {
             self.diagnostics.count_oversize_frame();
@@ -424,11 +454,31 @@ impl NetworkDriver {
             .gossipsub
             .publish(self.topic.clone(), frame)
         {
-            Ok(_) => Ok(()),
-            // Reaching nobody is success: a topic with no subscribers is not a
-            // failure, and a peer alone on the network is `Isolated` rather
-            // than broken. The same rule the simulated fabric applies.
-            Err(PublishError::NoPeersSubscribedToTopic | PublishError::Duplicate) => Ok(()),
+            // Handed to at least one subscribed peer. Gossip carries it from
+            // there; how far is not something this peer can observe.
+            Ok(_) => {
+                self.diagnostics.count_broadcast_propagated();
+                Ok(())
+            }
+            // Nobody was subscribed to the topic, so the frame went nowhere.
+            // Accepted — a lone peer publishing to itself is the ordinary state
+            // of a first launch — and *visibly* accepted, which is the whole
+            // point of the counter.
+            Err(PublishError::NoPeersSubscribedToTopic) => {
+                self.diagnostics.count_broadcast_reached_nobody();
+                Ok(())
+            }
+            // This exact frame has already been published from here, and
+            // gossipsub refuses to send it twice. Counted with the propagated
+            // ones rather than with the empty ones, and the ordering in
+            // `Behaviour::publish` is what makes that true rather than
+            // convenient: a publish that found nobody returns before the
+            // duplicate cache is written, so a frame can only be refused as a
+            // duplicate if an earlier attempt got past that point.
+            Err(PublishError::Duplicate) => {
+                self.diagnostics.count_broadcast_propagated();
+                Ok(())
+            }
             Err(_) => Err(MessageTransportError::Unavailable),
         };
 
@@ -957,29 +1007,17 @@ impl NetworkDriver {
             return;
         }
 
-        let discovered = DiscoveredPeer {
+        // The ledger `observe_peers` reads, and the pushed event, carry the
+        // same sighting. A root may use one or both: since D12 the read no
+        // longer empties the ledger, so the two are no longer alternatives —
+        // what they record is a peer's address, which is idempotent.
+        let now = self.elapsed_millis();
+        self.sightings.record(peer, &endpoints, now);
+
+        self.emit(NetworkEvent::PeerDiscovered(DiscoveredPeer {
             peer,
-            endpoints: endpoints.clone(),
-        };
-
-        // The buffer `observe_peers` drains, and the pushed event, carry the
-        // same sighting. A root uses one or the other, never both.
-        match self
-            .observed
-            .iter_mut()
-            .find(|existing| existing.peer == peer)
-        {
-            Some(existing) => {
-                for endpoint in endpoints {
-                    if !existing.endpoints.contains(&endpoint) {
-                        existing.endpoints.push(endpoint);
-                    }
-                }
-            }
-            None => self.observed.push(discovered.clone()),
-        }
-
-        self.emit(NetworkEvent::PeerDiscovered(discovered));
+            endpoints,
+        }));
     }
 
     /// How many addresses this driver holds for peers it might dial.

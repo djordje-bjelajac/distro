@@ -4,7 +4,7 @@ use infra_net_libp2p::swarm::NetworkEvent;
 use membership::ports::{DiscoveredPeer, InboundSessionPort, PeerDiscoveryPort};
 use messaging::ports::InboundEnvelopePort;
 
-use crate::composition::{DeliveryIndex, Diagnostics, LocalEndpoints, NoticeFeed};
+use crate::composition::{DeliveryIndex, Diagnostics, HeartbeatLedger, LocalEndpoints, NoticeFeed};
 use crate::runtime::{delivery_failure_of, transport_reason};
 
 /// Turns one `NetworkEvent` into the inbound port calls its documentation
@@ -43,6 +43,38 @@ use crate::runtime::{delivery_failure_of, transport_reason};
 ///   first: an envelope that turns out to be from a blocked author still
 ///   proves its *carrier* is alive.
 ///
+/// * **`DirectMessageDelivered` becomes two calls too**, `peer_heartbeat(peer)`
+///   then `message_delivered` (canvas `0010` D6). The acknowledgement was
+///   produced by the recipient's *process*, which makes it an act by the
+///   subject observed here at approximately the time it happened — the
+///   definition of evidence (invariant 1), and the only kind this peer can
+///   obtain about a peer it is talking to rather than hearing about. It is
+///   reported unconditionally and first, including when the signature
+///   correlates to no message this root still holds: an acknowledgement whose
+///   message was evicted is a weaker fact about the *message* and exactly as
+///   strong a fact about the *peer*.
+///
+///   Note what is deliberately **not** here: a session merely staying open. The
+///   build has no `ping` behaviour and gossipsub's long-lived stream disarms
+///   the idle timeout, so a connection to a dead peer can sit `Established`
+///   indefinitely (invariant 3).
+///
+/// # Two correlations, and why they must not be one (S6)
+///
+/// Since D7 a heartbeat travels as a direct message, so the transport answers
+/// for it with the very same two events. A heartbeat has no `MessageId` and is
+/// not in [`DeliveryIndex`], so without a second registry every heartbeat
+/// report would land in that index's "there is no message this could name"
+/// branch — which on the failure side raises *"a message to X was not
+/// delivered"*, once per presence tick, about a message the user never sent.
+///
+/// [`HeartbeatLedger`] is therefore consulted **before** the delivery index on
+/// both events, never as a fallback after it. What it recognises produces
+/// evidence and a counter and nothing else: no delivery state moves, no notice
+/// is raised, and a heartbeat that goes unanswered makes **no negative claim
+/// about presence** — the absence of an acknowledgement is not evidence of
+/// death, and presence ages out on its own.
+///
 /// # What is refused rather than fatal
 ///
 /// Every port refusal here is counted and shown, never propagated. A peer
@@ -56,26 +88,31 @@ pub struct EventRouter {
     discovery: Arc<dyn PeerDiscoveryPort + Send + Sync>,
     endpoints: Arc<LocalEndpoints>,
     deliveries: Arc<DeliveryIndex>,
+    heartbeats: Arc<HeartbeatLedger>,
     diagnostics: Arc<Diagnostics>,
     notices: Arc<NoticeFeed>,
 }
 
 impl EventRouter {
-    pub const fn new(
-        sessions: Arc<dyn InboundSessionPort + Send + Sync>,
-        inbound: Arc<dyn InboundEnvelopePort + Send + Sync>,
-        discovery: Arc<dyn PeerDiscoveryPort + Send + Sync>,
-        endpoints: Arc<LocalEndpoints>,
-        deliveries: Arc<DeliveryIndex>,
-        diagnostics: Arc<Diagnostics>,
-        notices: Arc<NoticeFeed>,
-    ) -> Self {
+    pub fn new(parts: EventRouterParts) -> Self {
+        let EventRouterParts {
+            sessions,
+            inbound,
+            discovery,
+            endpoints,
+            deliveries,
+            heartbeats,
+            diagnostics,
+            notices,
+        } = parts;
+
         Self {
             sessions,
             inbound,
             discovery,
             endpoints,
             deliveries,
+            heartbeats,
             diagnostics,
             notices,
         }
@@ -147,9 +184,27 @@ impl EventRouter {
                 }
             }
 
-            // → `InboundEnvelopePort::message_delivered`, by way of the
-            // signature the root recorded when it handed the envelope over.
+            // → `peer_heartbeat(peer)` then `InboundEnvelopePort::
+            // message_delivered`, the latter by way of the signature the root
+            // recorded when it handed the envelope over.
             NetworkEvent::DirectMessageDelivered { peer, signature } => {
+                // D6, and it is one line because it is unconditionally
+                // correct: the recipient's process produced an
+                // application-level acknowledgement, which is an act by the
+                // subject rather than a third party's report about it
+                // (invariant 1). Reported before any correlation, because
+                // whether *this* root still holds the message is a fact about
+                // this root's bookkeeping and not about the peer.
+                let _ = self.sessions.peer_heartbeat(peer);
+
+                // S6: a heartbeat's own acknowledgement stops here. It is
+                // already the evidence above; it names no message, has no
+                // delivery state to move, and must not reach the index that
+                // would call it an uncorrelated report.
+                if self.heartbeats.is_heartbeat(&signature) {
+                    return;
+                }
+
                 let Some(message) = self.deliveries.take(&signature) else {
                     // Evicted, or already answered. Counted rather than
                     // guessed at: there is no message this could name.
@@ -181,6 +236,23 @@ impl EventRouter {
                 signature,
                 reason,
             } => {
+                // S6, and the reason this check exists at all. A heartbeat is
+                // not in the delivery index, so without this it would fall
+                // through to the branch below and tell the user "a message to
+                // X was not delivered" — every ten seconds, for as long as a
+                // peer stays unreachable, about a message they never sent.
+                //
+                // A counter and nothing else. No notice, because there is no
+                // message and nothing for a user to do; and **no presence
+                // claim**, because the absence of an acknowledgement is not
+                // evidence of death (invariant 1 admits only acts the peer
+                // performed). Presence ages out on its own evidence, which is
+                // the honest way for this to show up.
+                if self.heartbeats.is_heartbeat(&signature) {
+                    self.diagnostics.count_heartbeat_unacknowledged();
+                    return;
+                }
+
                 self.diagnostics.count_direct_delivery_failure();
 
                 let Some(message) = self.deliveries.take(&signature) else {
@@ -295,6 +367,27 @@ impl std::fmt::Debug for EventRouter {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("EventRouter").finish_non_exhaustive()
     }
+}
+
+/// Everything an [`EventRouter`] routes into, named at the call site.
+///
+/// Eight `Arc`s in a row is a positional argument list nobody can read and any
+/// two adjacent entries of the same type can be transposed in silently. The
+/// pattern is `messaging`'s `MessagingPorts`, for the same reason and with the
+/// same shape: the root states which collaborator is which, and the compiler
+/// checks it.
+pub struct EventRouterParts {
+    pub sessions: Arc<dyn InboundSessionPort + Send + Sync>,
+    pub inbound: Arc<dyn InboundEnvelopePort + Send + Sync>,
+    pub discovery: Arc<dyn PeerDiscoveryPort + Send + Sync>,
+    pub endpoints: Arc<LocalEndpoints>,
+    /// Which message a signature belongs to (AC11).
+    pub deliveries: Arc<DeliveryIndex>,
+    /// Which signatures were heartbeats rather than messages — consulted
+    /// *before* `deliveries` on both delivery events (canvas `0010` S6).
+    pub heartbeats: Arc<HeartbeatLedger>,
+    pub diagnostics: Arc<Diagnostics>,
+    pub notices: Arc<NoticeFeed>,
 }
 
 /// A peer's first eight fingerprint characters — enough to recognise in a log

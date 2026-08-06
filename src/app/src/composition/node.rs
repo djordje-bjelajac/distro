@@ -24,8 +24,9 @@ use messaging::ports::{
 use shared_types::{PeerId, ProtocolVersion};
 
 use crate::composition::{
-    CorrelatingTransport, DeliveryIndex, Diagnostics, GapLedger, HeartbeatBeacon, LocalEndpoints,
-    MembershipEventRelay, MessagingEventSink, NoticeFeed, SystemClock, TrustDirectory,
+    CorrelatingTransport, DeliveryIndex, Diagnostics, GapLedger, HeartbeatBeacon, HeartbeatLedger,
+    LocalEndpoints, MembershipEventRelay, MessagingEventSink, NoticeFeed, SystemClock,
+    TrustDirectory,
 };
 
 /// One running instance: three contexts, five stores, one swarm, and the
@@ -85,6 +86,7 @@ pub struct Node {
     membership_events: Arc<MembershipEventRelay>,
     endpoints: Arc<LocalEndpoints>,
     deliveries: Arc<DeliveryIndex>,
+    heartbeats: Arc<HeartbeatLedger>,
     gaps: Arc<GapLedger>,
     notices: Arc<NoticeFeed>,
     diagnostics: Arc<Diagnostics>,
@@ -157,6 +159,7 @@ impl Node {
         let membership_events = Arc::new(MembershipEventRelay::new());
         let endpoints = Arc::new(LocalEndpoints::new());
         let deliveries = Arc::new(DeliveryIndex::new());
+        let heartbeats = Arc::new(HeartbeatLedger::new());
         let gaps = Arc::new(GapLedger::new());
         let notices = Arc::new(NoticeFeed::new());
         let diagnostics = Arc::new(Diagnostics::default());
@@ -181,10 +184,12 @@ impl Node {
         ));
 
         // --------------------------------------------------------- messaging
+        let wire =
+            Arc::new(network.message_transport()) as Arc<dyn MessageTransportPort + Send + Sync>;
         // The transport is wrapped so the root can recognise the
         // acknowledgement that arrives later, by signature (AC11).
         let transport = Arc::new(CorrelatingTransport::new(
-            Arc::new(network.message_transport()) as Arc<dyn MessageTransportPort + Send + Sync>,
+            Arc::clone(&wire),
             Arc::clone(&deliveries),
         )) as Arc<dyn MessageTransportPort + Send + Sync>;
 
@@ -211,11 +216,22 @@ impl Node {
             },
         ));
 
+        // The beacon is given the **unwrapped** transport, and that is the
+        // structural half of S6: a heartbeat cannot enter the delivery index
+        // because it never passes through the thing that writes to it. The
+        // wrapper would in fact decline to index one — a heartbeat's payload is
+        // empty and does not decode into a `MessagePayload` — but that is a
+        // property of what a heartbeat happens to carry, not a rule, and the
+        // rule is worth having in the wiring where it can be read.
+        //
+        // What the beacon writes instead is `heartbeats`, which the event
+        // router consults first on both delivery events.
         let beacon = Arc::new(HeartbeatBeacon::new(
             local_peer,
             settings.network.protocol_version,
             signer as Arc<dyn EnvelopeSignerPort + Send + Sync>,
-            transport,
+            wire,
+            Arc::clone(&heartbeats),
         ));
 
         Ok(Self {
@@ -230,6 +246,7 @@ impl Node {
             membership_events,
             endpoints,
             deliveries,
+            heartbeats,
             gaps,
             notices,
             diagnostics,
@@ -286,6 +303,12 @@ impl Node {
 
     pub fn deliveries(&self) -> &Arc<DeliveryIndex> {
         &self.deliveries
+    }
+
+    /// The signatures the beacon released, so a delivery report about a
+    /// heartbeat is never read as one about a message (canvas `0010` S6).
+    pub fn heartbeats(&self) -> &Arc<HeartbeatLedger> {
+        &self.heartbeats
     }
 
     pub fn gaps(&self) -> &Arc<GapLedger> {

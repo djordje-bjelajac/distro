@@ -40,21 +40,40 @@
 //! above that (P3-7/S2). Whether the asserted address genuinely works from
 //! outside is the operator's claim, and nothing here pretends to check it
 //! (`0008` S5).
+//!
+//! # And once more for the two adapter defects of canvas `0010`
+//!
+//! The same harness, for the same reason, extended rather than duplicated. A
+//! destructive read (D12) and a broadcast that reached nobody (D11) are both
+//! states two real loopback swarms cannot be *held in*: a loopback pair
+//! discovers each other and meshes, so the failing case never arises. Supplying
+//! the mDNS event libp2p would have delivered, and then asking the driver
+//! twice, is what makes "the second join has the same rung available to it as
+//! the first" an assertion rather than a hope.
+//!
+//! What is asserted below is the empty half of D11 — a publish that found
+//! nobody. The propagated half needs a second peer actually subscribed to the
+//! topic, so it lives in `runtime/network_runtime_test.rs` beside the two-swarm
+//! broadcast that is already there; the pair of them is what makes the two
+//! outcomes *distinguishable* rather than merely counted.
 
 use std::sync::mpsc::{Receiver, TryRecvError, sync_channel};
 
 use libp2p::gossipsub::IdentTopic;
 use libp2p::identity::Keypair;
 use libp2p::swarm::{ConnectionId, SwarmEvent};
-use libp2p::{Multiaddr, PeerId as Libp2pPeerId, autonat, identify};
+use libp2p::{Multiaddr, PeerId as Libp2pPeerId, autonat, identify, mdns};
+use membership::ports::DiscoveredPeer;
 // Two different questions share this name: the domain's is a property of one
 // *address* (direct or relayed), this crate's is a property of *this peer's*
 // position on the network. Aliased rather than qualified so neither reads as
 // the other.
 use membership::domain::Reachability as EndpointReachability;
+use messaging::ports::MessageTransportError;
 use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
 
 use crate::codec::{CodecDiagnostics, EnvelopeCodec};
+use crate::limits::ResourceLimits;
 use crate::mapping::EndpointMapping;
 use crate::runtime::network_runtime::build_swarm;
 use crate::runtime::{NetworkConfig, NetworkIdentity, NetworkStartError};
@@ -84,6 +103,9 @@ struct Harness {
     driver: NetworkDriver,
     events: Receiver<NetworkEvent>,
     diagnostics: CodecDiagnostics,
+    /// The caps this driver was built with, so a test asserts against the
+    /// numbers in force rather than against a copy of them.
+    limits: ResourceLimits,
 }
 
 impl Harness {
@@ -93,10 +115,23 @@ impl Harness {
     /// a fact about the machine rather than a failure of this code — the same
     /// treatment the loopback tests give a socket they cannot bind.
     fn start() -> Option<Self> {
+        Self::start_with(ResourceLimits::DEFAULT)
+    }
+
+    /// The same driver with one limit moved, so a bound can be reached by a
+    /// test instead of by an attacker.
+    ///
+    /// The same device `ResourceLimits` documents itself: the shipped values
+    /// are the ones production reads, and a test drives one of them down to
+    /// something it can actually exhaust.
+    fn start_with(limits: ResourceLimits) -> Option<Self> {
         let mut secret = ALICE_SECRET_KEY;
         let identity = NetworkIdentity::from_ed25519_secret_key(&mut secret)
             .expect("RFC 8032 vector is a valid secret key");
-        let config = NetworkConfig::loopback();
+        let config = NetworkConfig {
+            limits,
+            ..NetworkConfig::loopback()
+        };
         let topic = IdentTopic::new(&config.broadcast_topic);
 
         let runtime = match tokio::runtime::Builder::new_current_thread()
@@ -142,6 +177,7 @@ impl Harness {
             _commands: commands_tx,
             events: events_rx,
             diagnostics,
+            limits: config.limits,
         })
     }
 
@@ -195,6 +231,47 @@ impl Harness {
             &address(tested),
             ProbeResult::Failed,
         );
+    }
+
+    /// Hands the driver an mDNS sighting, in the shape the behaviour emits it.
+    ///
+    /// A real `DistroBehaviourEvent` through the real `handle_swarm_event`, so
+    /// the match arm is what routes it — mDNS is off in every test
+    /// configuration (`NetworkConfig::loopback`), and it is the rung D12's
+    /// defect broke, so supplying the event is the only way to exercise it.
+    fn mdns_discovered(&mut self, sightings: Vec<(Libp2pPeerId, Multiaddr)>) {
+        self.driver
+            .handle_swarm_event(SwarmEvent::Behaviour(DistroBehaviourEvent::Mdns(
+                mdns::Event::Discovered(sightings),
+            )));
+    }
+
+    /// Asks the driver what discovery has seen, over the real command arm.
+    ///
+    /// Not a test-only accessor on the driver: the defect was *in the arm*
+    /// (`std::mem::take`), so a test that reached past it would have passed
+    /// against the broken build.
+    fn observe_peers(&mut self) -> Vec<DiscoveredPeer> {
+        let (reply, answer) = sync_channel(1);
+        self.driver
+            .handle_command(NetworkCommand::ObservePeers { reply });
+        answer
+            .try_recv()
+            .expect("the driver answers an observation immediately")
+            .expect("observing is never an error here")
+    }
+
+    /// Publishes one frame to the broadcast topic, over the real command arm.
+    fn publish_broadcast(&mut self, frame: &[u8]) -> Result<(), MessageTransportError> {
+        let (reply, answer) = sync_channel(1);
+        self.driver
+            .handle_command(NetworkCommand::PublishBroadcast {
+                frame: frame.to_vec(),
+                reply,
+            });
+        answer
+            .try_recv()
+            .expect("the driver answers a publish immediately")
     }
 
     /// Every event the driver has pushed so far.
@@ -817,6 +894,180 @@ fn an_override_is_still_probed_and_can_still_be_contradicted() {
     assert_eq!(verdicts(&harness.drain()), vec![reachable_at(PUBLIC)]);
     assert_eq!(harness.diagnostics.probes_run(), 3);
     assert_eq!(harness.diagnostics.probes_succeeded(), 1);
+}
+
+// --------------------------- the two adapter defects (canvas `0010`, OP-5)
+
+/// A distinct Ed25519 identity per index, for the tests that need more of them
+/// than [`keypair`]'s single byte can express.
+///
+/// The seeds are disjoint from `keypair`'s by construction — that one repeats
+/// one byte thirty-two times, this one leaves twenty-eight of them zero — so a
+/// flood built here can never collide with a fixture used above.
+fn nth_keypair(index: u32) -> Keypair {
+    let mut seed = [0_u8; 32];
+    seed[..4].copy_from_slice(&index.to_be_bytes());
+    Keypair::ed25519_from_bytes(seed).expect("32 bytes are a valid Ed25519 seed")
+}
+
+/// One mDNS sighting: a peer, and the LAN address it answers at.
+fn lan_sighting(index: u32) -> (Libp2pPeerId, Multiaddr) {
+    (
+        nth_keypair(index).public().to_peer_id(),
+        address(&format!("/ip4/192.168.1.10/tcp/{}", 4001 + index)),
+    )
+}
+
+#[test]
+fn the_same_sightings_are_there_for_a_second_join_as_for_the_first() {
+    // **A7, and the regression this operation exists for.** `ObservePeers` was
+    // served by `std::mem::take`, so the LAN rung emptied its own input: the
+    // first join connected over `local network` and every later one — a
+    // rejoin, a reconnect after a drop — reported `local network: nothing to
+    // try` with the neighbour still sitting on the link. Observed directly
+    // across two joins of one unmoved instance.
+    //
+    // The assertion is equality across reads, not merely a non-empty second
+    // read: a driver that answered twice and forgot on the third would be the
+    // same defect one join further along.
+    let mut harness = harness_or_skip!();
+    harness.mdns_discovered(vec![lan_sighting(1), lan_sighting(2)]);
+
+    let first = harness.observe_peers();
+    let second = harness.observe_peers();
+    let third = harness.observe_peers();
+
+    assert_eq!(first.len(), 2, "both LAN neighbours are candidates");
+    assert_eq!(
+        first, second,
+        "the second join sees exactly what the first one saw (A7)"
+    );
+    assert_eq!(second, third, "and so does the third");
+}
+
+#[test]
+fn a_peer_seen_again_refreshes_its_sighting_instead_of_appearing_twice() {
+    // The rung dials candidates one at a time until one answers, so a duplicate
+    // entry is a wasted dial and a slower join. mDNS re-announces on a timer
+    // and Kademlia routing updates arrive continuously, which makes re-sighting
+    // the ordinary case rather than the edge one.
+    let mut harness = harness_or_skip!();
+    let peer = nth_keypair(1).public().to_peer_id();
+
+    harness.mdns_discovered(vec![(peer, address("/ip4/192.168.1.10/tcp/4001"))]);
+    harness.mdns_discovered(vec![(peer, address("/ip4/192.168.1.10/tcp/4001"))]);
+    harness.mdns_discovered(vec![(peer, address("/ip4/203.0.113.7/tcp/4001"))]);
+
+    let observed = harness.observe_peers();
+    assert_eq!(observed.len(), 1, "one peer, however often it announces");
+    assert_eq!(
+        observed[0].endpoints.len(),
+        2,
+        "and both addresses it claimed, each once"
+    );
+}
+
+#[test]
+fn a_flood_of_sightings_cannot_grow_the_buffer_past_its_bound() {
+    // **Canvas §7/S6.** A read that no longer empties the buffer is a read that
+    // no longer bounds it, so the bound has to be somewhere — and the input is
+    // attacker-influenceable in the most direct way there is: mDNS is
+    // answerable by any host on the link, and identities are free.
+    //
+    // Driven at the cap rather than under it, through the real mDNS arm, so
+    // what is asserted is the driver's behaviour and not the ledger's unit test
+    // repeated.
+    let mut harness = match Harness::start_with(ResourceLimits {
+        max_observed_peers: 8,
+        ..ResourceLimits::DEFAULT
+    }) {
+        Some(harness) => harness,
+        None => return,
+    };
+
+    for index in 0..200 {
+        harness.mdns_discovered(vec![lan_sighting(index)]);
+        // Drained so the bounded event queue never becomes the thing under
+        // test: what is bounded here is the sighting buffer.
+        let _ = harness.drain();
+        assert!(
+            harness.observe_peers().len() <= 8,
+            "the bound holds at every step, not only at the end"
+        );
+    }
+
+    assert_eq!(harness.observe_peers().len(), 8);
+    assert_eq!(
+        harness.diagnostics.dropped_events(),
+        0,
+        "and the flood was absorbed rather than overflowing anything else"
+    );
+}
+
+#[test]
+fn a_broadcast_that_reached_nobody_is_accepted_and_says_so() {
+    // **D11 and the empty half of A6.** A peer alone on the network is
+    // `Isolated`, which is a normal status, so this must not become an `Err`
+    // that callers treat as a fault — and it must not be indistinguishable from
+    // a delivery either, which is what `→ published` was for a run whose
+    // broadcasts appeared in no other pane.
+    let mut harness = harness_or_skip!();
+
+    assert_eq!(
+        harness.publish_broadcast(b"anyone there?"),
+        Ok(()),
+        "publishing while alone is normal, not an error"
+    );
+
+    assert_eq!(
+        harness.diagnostics.broadcasts_reaching_nobody(),
+        1,
+        "and it is visible as what it was"
+    );
+    assert_eq!(
+        harness.diagnostics.broadcasts_propagated(),
+        0,
+        "nothing was handed to anybody, and nothing claims it was (A6)"
+    );
+}
+
+#[test]
+fn every_broadcast_lands_in_exactly_one_of_the_two_counters() {
+    // The counters are the only place the difference survives, so they have to
+    // account for every publish: a call that incremented neither would restore
+    // the silence the whole change is about, one release later and invisibly.
+    let mut harness = harness_or_skip!();
+
+    for attempt in 0..5 {
+        assert_eq!(
+            harness.publish_broadcast(format!("{attempt}").as_bytes()),
+            Ok(())
+        );
+    }
+
+    assert_eq!(
+        harness.diagnostics.broadcasts_propagated()
+            + harness.diagnostics.broadcasts_reaching_nobody(),
+        5
+    );
+}
+
+#[test]
+fn an_oversize_broadcast_is_refused_and_counted_as_neither_outcome() {
+    // The refusal path is a *failure*, not a state: nothing was published, so
+    // neither publishing counter may move. Asserted because the easy way to
+    // write the arm above is to count first and decide afterwards.
+    let mut harness = harness_or_skip!();
+    let oversize = vec![0_u8; harness.limits.max_envelope_bytes + 1];
+
+    assert_eq!(
+        harness.publish_broadcast(&oversize),
+        Err(MessageTransportError::Unavailable)
+    );
+
+    assert_eq!(harness.diagnostics.oversize_frames(), 1);
+    assert_eq!(harness.diagnostics.broadcasts_propagated(), 0);
+    assert_eq!(harness.diagnostics.broadcasts_reaching_nobody(), 0);
 }
 
 /// The observer this crate maps a keypair to, used only to keep the fixtures

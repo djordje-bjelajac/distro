@@ -23,7 +23,22 @@ pub trait PeerDiscoveryPort {
     /// where this peer is.
     fn announce(&self, endpoints: &[Endpoint]) -> Result<(), PeerDiscoveryError>;
 
-    /// Reports the peers the mechanism has seen since the last call.
+    /// Reports the peers the mechanism has seen recently.
+    ///
+    /// **Idempotent: reading is a question, not a withdrawal** (canvas `0010`
+    /// D12, A7). Two calls with nothing happening in between yield the same
+    /// sightings. The bootstrap ladder's LAN rung *pulls* from here on every
+    /// join, so an implementation that emptied its own buffer would work
+    /// exactly once — which is the failure that was observed: one unmoved
+    /// instance joined over `local network` and then reported `local network:
+    /// nothing to try` on its next join, with a live neighbour on the same link
+    /// throughout.
+    ///
+    /// What removes a sighting is the mechanism's own retention rule — an age,
+    /// a bound on how many strangers' addresses it will hold — never the fact
+    /// that somebody looked. Implementations are therefore free to *drop* a
+    /// sighting between two calls; they are not free to drop it *because* of
+    /// one.
     ///
     /// An empty result is success, not failure — a LAN with no neighbour is
     /// the ordinary state of a first launch, and `Isolated` is a normal

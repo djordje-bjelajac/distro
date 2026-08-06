@@ -59,7 +59,14 @@ pub(crate) enum NetworkCommand {
         endpoints: Vec<Endpoint>,
         reply: Reply<(), PeerDiscoveryError>,
     },
-    /// Report the peers discovery has seen since the last call.
+    /// Report the peers discovery has seen recently.
+    ///
+    /// **Recently, not "since the last call".** Answering does not consume the
+    /// sighting: a rung that empties its own input works exactly once, which is
+    /// the defect canvas `0010` D12 names and A7 guards. Sightings leave the
+    /// buffer by ageing out, never by being read — see
+    /// [`SightingLedger`](crate::swarm::sighting_ledger::SightingLedger) for the
+    /// retention rule and its bound.
     ObservePeers {
         reply: Reply<Vec<DiscoveredPeer>, PeerDiscoveryError>,
     },

@@ -20,6 +20,10 @@ pub struct LeaveOutcome {
     pub disconnected: Vec<PeerDisconnected>,
     /// How many peers were written to the cache for the next launch's first
     /// bootstrap rung (D1).
+    ///
+    /// Fewer than the roster holds whenever some entries never produced
+    /// evidence of life: an identity this peer was only *told about* is not
+    /// written to disk, where the next launch would dial it first (D8, S5).
     pub cached_peers: usize,
     /// Why the cache could not be written, when it could not be.
     ///

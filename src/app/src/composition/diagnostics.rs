@@ -47,7 +47,19 @@ pub struct Diagnostics {
     gaps_abandoned: AtomicU64,
     messages_never_received: AtomicU64,
     heartbeats_sent: AtomicU64,
+    /// Heartbeats that never left: the transport would not take them, or the
+    /// envelope could not be signed.
     heartbeats_failed: AtomicU64,
+    /// Heartbeats that went out and nothing came back.
+    ///
+    /// A third number rather than more of `heartbeats_failed`, because it is a
+    /// different fault and the two are differently actionable: the one above is
+    /// this peer failing to speak, this one is a peer failing to answer. Since
+    /// a heartbeat is a direct message it is acknowledged, and the absence of
+    /// that acknowledgement is the only thing this records — **not** a claim
+    /// that the peer is gone. Presence ages out on its own evidence and nothing
+    /// here touches it (canvas `0010` S6).
+    heartbeats_unacknowledged: AtomicU64,
     direct_delivery_failures: AtomicU64,
     uncorrelated_reports: AtomicU64,
     port_refusals: AtomicU64,
@@ -93,11 +105,38 @@ impl Diagnostics {
     counter!(count_envelope_refused, envelopes_refused);
     counter!(count_envelope_ignored, envelopes_ignored);
     counter!(count_duplicate_ignored, duplicates_ignored);
-    counter!(count_heartbeat_sent, heartbeats_sent);
-    counter!(count_heartbeat_failed, heartbeats_failed);
+    counter!(count_heartbeat_unacknowledged, heartbeats_unacknowledged);
     counter!(count_direct_delivery_failure, direct_delivery_failures);
     counter!(count_uncorrelated_report, uncorrelated_reports);
     counter!(count_port_refusal, port_refusals);
+
+    /// Records what one round of heartbeats did: `sent` reached the transport,
+    /// `failed` did not.
+    ///
+    /// One call per presence tick rather than one per peer, because a round is
+    /// what the beacon performs — one signature, one envelope, one send per
+    /// linked peer (canvas `0010` D7). A round with nobody to send to records
+    /// nothing, which is the truth: an instance with no sessions is not failing
+    /// to speak, it has nobody to speak to, and a rising failure count for that
+    /// would read as a fault on a fresh install.
+    ///
+    /// Neither number says anything about a peer being alive. An accepted send
+    /// means the transport took the envelope; only the acknowledgement that may
+    /// follow is evidence, and that is counted separately by
+    /// [`count_heartbeat_unacknowledged`](Self::count_heartbeat_unacknowledged)
+    /// when it never comes.
+    pub fn count_heartbeat_round(&self, sent: u64, failed: u64) {
+        self.heartbeats_sent.fetch_add(sent, Ordering::Relaxed);
+        self.heartbeats_failed.fetch_add(failed, Ordering::Relaxed);
+    }
+
+    pub fn heartbeats_sent(&self) -> u64 {
+        self.heartbeats_sent.load(Ordering::Relaxed)
+    }
+
+    pub fn heartbeats_failed(&self) -> u64 {
+        self.heartbeats_failed.load(Ordering::Relaxed)
+    }
 
     /// Records one abandoned gap and how many of an author's messages it wrote
     /// off (AC15).

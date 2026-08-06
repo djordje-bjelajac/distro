@@ -51,9 +51,11 @@ pub enum NetworkEvent {
 
     /// A discovery mechanism saw a peer. → `InboundSessionPort::peer_observed`.
     ///
-    /// Also delivered through `PeerDiscoveryPort::observe_peers`, which drains
-    /// the same buffer; a root may use either, but not both, or it will record
-    /// each sighting twice.
+    /// Also delivered through `PeerDiscoveryPort::observe_peers`, which reads
+    /// the same buffer without emptying it (canvas `0010` D12). A root may use
+    /// either or both: what either one records is a peer's *address*, which is
+    /// idempotent, and since discovery is not evidence of life a repeat
+    /// sighting cannot make a peer look alive.
     PeerDiscovered(DiscoveredPeer),
 
     /// A remote peer dialled this one and the handshake completed. →

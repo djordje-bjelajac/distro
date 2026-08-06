@@ -159,11 +159,31 @@ fn a_broadcast_reaches_every_online_peer_however_gossip_scrambles_it() {
 }
 
 #[test]
-fn a_late_joiner_sees_everything_the_author_sends_after_it_arrives() {
+fn a_late_joiner_sees_everything_sent_after_it_arrives_and_nothing_before_is_called_lost() {
     // AC10's affirmative half, and the exact clause the pre-rework code failed:
     // no history is replayed to a late joiner, *but* every message the author
     // sends after it joins must be displayed, within one gap-tolerance window
     // of first contact (rule R).
+    //
+    // # What this test used to assert, and why that was the defect
+    //
+    // It required carol's first contact to produce a `MessageGapClosed` naming
+    // sequences 1–5 "never received". Those messages were sent before carol's
+    // process existed; nothing was ever in flight to carol, and no amount of
+    // waiting could have delivered them. Reporting them as loss is precisely
+    // the false claim canvas `0010` D10 removes: the first sequence ever seen
+    // from an author *establishes the origin*, and nothing below it is loss.
+    // The old assertion is inverted below.
+    //
+    // # Why the second half of the scenario is here (safeguard S3)
+    //
+    // Inverting a loss assertion is one keystroke away from deleting the
+    // warning altogether, which would satisfy the screenshot and fix nothing.
+    // So the same carol, the same author, and the same conversation go on to
+    // lose a message that genuinely *was* in flight — and that one is still
+    // named. Both halves of D10 hold for one peer in one run, which is the only
+    // form in which "no false loss" is distinguishable from "no loss reporting"
+    // (AC10, A1, A2).
     let mut net = SimNetwork::seeded(SEED)
         .with_peers(["alice", "bob"])
         .build();
@@ -200,6 +220,10 @@ fn a_late_joiner_sees_everything_the_author_sends_after_it_arrives() {
         net.peer(carol).broadcast_history().is_empty(),
         "an unresolved gap must not be displayed through"
     );
+    assert!(
+        net.peer(bob).broadcast_history().len() == before.len() + after.len(),
+        "the scenario needs a peer that was present throughout to compare against"
+    );
 
     net.advance(gap_tolerance(&net));
     net.tick();
@@ -223,13 +247,82 @@ fn a_late_joiner_sees_everything_the_author_sends_after_it_arrives() {
             "history was replayed to a late joiner: {text}"
         );
     }
+    // And nothing is called lost. The run below carol's first sighting was
+    // never in flight here — no path, no delay, and no future arrival could
+    // have produced it — so naming it in a `MessageGapClosed` would be a claim
+    // about messages that never existed for this peer (D10, A1).
+    assert!(
+        gap_closures(&net, carol).is_empty(),
+        "first contact part-way through an author's run was reported as loss: {:?}",
+        gap_closures(&net, carol)
+    );
+    assert_eq!(
+        net.peer(carol)
+            .broadcast_history()
+            .first()
+            .map(|message| message.sequence().as_u64()),
+        Some(before.len() as u64 + 1),
+        "the stream did not start where this peer first heard it"
+    );
+
+    // ---- the guard: loss that is real is still named ----------------------
+    //
+    // Carol now has an origin, so the next absence is a run between two
+    // sequences it did observe — genuinely in flight, genuinely lost. A build
+    // that silenced the warning rather than narrowing it fails from here down
+    // (A2).
+    net.partition_off(&[carol]);
+    net.peer(alice)
+        .publish_broadcast("lost to the split")
+        .expect("gossip accepts it");
+    net.settle();
+    net.heal_partitions();
+
+    net.peer(alice)
+        .publish_broadcast("after the split")
+        .expect("gossip accepts it");
+    net.settle();
+    assert_eq!(
+        net.peer(carol).transcript(ConversationId::Broadcast),
+        after,
+        "a message behind an open gap was displayed through"
+    );
+
+    net.advance(gap_tolerance(&net));
+    net.tick();
+
     let closed = gap_closures(&net, carol);
-    assert_eq!(closed.len(), 1, "expected exactly one abandoned range");
+    assert_eq!(
+        closed.len(),
+        1,
+        "a run between two observed sequences stopped being reported as loss"
+    );
     assert_eq!(closed[0].conversation, ConversationId::Broadcast);
     assert_eq!(closed[0].author, alice);
-    assert_eq!(closed[0].from.as_u64(), 1);
-    assert_eq!(closed[0].to.as_u64(), before.len() as u64);
+    assert_eq!(
+        closed[0].from.as_u64(),
+        (before.len() + after.len() + 1) as u64
+    );
+    assert_eq!(
+        closed[0].to.as_u64(),
+        (before.len() + after.len() + 1) as u64
+    );
     assert_eq!(closed[0].cause, GapCloseCause::ToleranceElapsed);
+
+    // The message stuck behind the abandoned range is now readable, and the one
+    // given up on stays unsaid rather than being resurrected.
+    let mut expected: Vec<String> = after.iter().map(|text| (*text).to_owned()).collect();
+    expected.push("after the split".to_owned());
+    assert_eq!(
+        net.peer(carol).transcript(ConversationId::Broadcast),
+        expected
+    );
+    assert!(
+        !net.peer(carol)
+            .transcript(ConversationId::Broadcast)
+            .contains(&"lost to the split".to_owned()),
+        "an abandoned message was resurrected"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -321,19 +414,53 @@ fn a_permanent_gap_is_abandoned_by_name_and_the_run_behind_it_becomes_visible() 
     // AC15 and rule R: the abandoned range is named in a `MessageGapClosed`,
     // the messages stuck behind it become visible, and a message that arrives
     // after its gap has closed is reported rather than silently discarded.
+    //
+    // # Why the scenario opens with a message that arrives (D10, A2)
+    //
+    // It used to start by delaying alice's *first* message past the window, so
+    // bob's first sight of alice was sequence 2. Since D10 that is
+    // indistinguishable — to bob, and to anything bob could compute — from
+    // "bob's stream simply starts at 2", which is what a late joiner sees and
+    // must not be told is loss. This is an accepted consequence of A1 rather
+    // than a hole: sequence 1 genuinely *was* in flight, and D10 gives that up
+    // deliberately, because the receiver's high-water mark does not survive its
+    // process (D7) while the sender's counter does (D12), so keeping the old
+    // reading would report phantom loss on every restart.
+    //
+    // Nothing goes silent. That message still cannot arrive unnoticed: when it
+    // lands it is rejected as `ArrivedAfterGapClosed`, asserted below. What is
+    // gone by design is the *`MessageGapClosed`* for a run below the first
+    // sequence a log ever saw.
+    //
+    // So the scenario establishes an origin first. The loss it then stages is a
+    // run between two sequences bob actually observed — the case A2 keeps, and
+    // the one this test exists for.
     let net = pair();
     let (alice, bob) = (net.peer_id("alice"), net.peer_id("bob"));
     net.boot_all();
 
-    // The first message is delayed far past the window; the next two are not.
-    const LOST_FOR_MILLIS: u64 = 10_000;
-    net.script_delays([LOST_FOR_MILLIS, 0, 0]);
-
-    let first = net
+    let arrived = net
         .peer(alice)
         .send_direct(bob, "one")
         .expect("the session is up");
-    for text in ["two", "three"] {
+    net.settle();
+    assert_eq!(
+        net.peer(bob).transcript(ConversationId::Direct(alice)),
+        ["one"],
+        "the scenario needs an origin before it can stage a gap above one"
+    );
+    assert_eq!(arrived.sent.id.sequence(), SequenceNumber::FIRST);
+
+    // The next message is delayed far past the window; the two after it are
+    // not, so they arrive and wait behind it.
+    const LOST_FOR_MILLIS: u64 = 10_000;
+    net.script_delays([LOST_FOR_MILLIS, 0, 0]);
+
+    let lost = net
+        .peer(alice)
+        .send_direct(bob, "two")
+        .expect("the session is up");
+    for text in ["three", "four"] {
         net.peer(alice)
             .send_direct(bob, text)
             .expect("the session is up");
@@ -342,14 +469,15 @@ fn a_permanent_gap_is_abandoned_by_name_and_the_run_behind_it_becomes_visible() 
     // `pump` rather than `settle`: the clock must stay where the scenario put
     // it, so the delayed message is still in flight.
     net.pump();
-    assert!(
-        net.peer(bob).direct_history(alice).is_empty(),
+    assert_eq!(
+        net.peer(bob).transcript(ConversationId::Direct(alice)),
+        ["one"],
         "messages behind an open gap must not be displayed"
     );
     assert_eq!(
         net.pending_frames(),
         1,
-        "the first message is still in flight"
+        "the second message is still in flight"
     );
 
     net.advance(gap_tolerance(&net));
@@ -361,12 +489,12 @@ fn a_permanent_gap_is_abandoned_by_name_and_the_run_behind_it_becomes_visible() 
     assert_eq!(closed.len(), 1);
     assert_eq!(closed[0].conversation, ConversationId::Direct(alice));
     assert_eq!(closed[0].author, alice);
-    assert_eq!(closed[0].from, SequenceNumber::FIRST);
-    assert_eq!(closed[0].to, SequenceNumber::FIRST);
+    assert_eq!(closed[0].from.as_u64(), 2);
+    assert_eq!(closed[0].to.as_u64(), 2);
     assert_eq!(closed[0].cause, GapCloseCause::ToleranceElapsed);
     assert_eq!(
         net.peer(bob).transcript(ConversationId::Direct(alice)),
-        ["two", "three"]
+        ["one", "three", "four"]
     );
 
     // The abandoned message finally arrives. It is reported, not applied, and
@@ -377,7 +505,7 @@ fn a_permanent_gap_is_abandoned_by_name_and_the_run_behind_it_becomes_visible() 
 
     assert_eq!(
         net.peer(bob).transcript(ConversationId::Direct(alice)),
-        ["two", "three"],
+        ["one", "three", "four"],
         "a message that arrived after its gap closed was displayed out of order"
     );
     assert!(
@@ -403,8 +531,13 @@ fn a_permanent_gap_is_abandoned_by_name_and_the_run_behind_it_becomes_visible() 
     // is still awaiting an acknowledgement that will not come. Pending is a
     // visible state; silence is not (AC11).
     assert_eq!(
-        net.peer(alice).delivery_state(first.sent.id),
+        net.peer(alice).delivery_state(lost.sent.id),
         Some(DeliveryState::Pending)
+    );
+    assert_eq!(
+        net.peer(alice).delivery_state(arrived.sent.id),
+        Some(DeliveryState::Delivered),
+        "the message that established the origin was acknowledged"
     );
 }
 

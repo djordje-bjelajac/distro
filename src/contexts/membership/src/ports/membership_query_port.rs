@@ -1,7 +1,7 @@
 use shared_types::PeerId;
 
 use crate::domain::NetworkStatus;
-use crate::ports::KnownPeerView;
+use crate::ports::{KnownPeerView, NetworkView};
 
 /// The **inbound** (driving) read contract of `membership` (canvas §4, inbound
 /// column).
@@ -24,6 +24,17 @@ use crate::ports::KnownPeerView;
 /// Object-safe and `&self`-taking, so a root can hold it behind
 /// `Arc<dyn MembershipQueryPort + Send + Sync>`.
 pub trait MembershipQueryPort {
+    /// The status line and the roster rows as **one** snapshot: one traversal
+    /// of the roster, one clock reading, one classification.
+    ///
+    /// This is what a screen showing both should call. The three methods below
+    /// answer narrower questions and remain for callers that want only one of
+    /// them, but a caller that renders a count *and* the rows it counts must not
+    /// assemble them from two calls: that is how `connected (2 peers)` came to
+    /// sit above a roster of `offline` rows, and [`NetworkView`] exists so the
+    /// two cannot be stated independently (canvas D5).
+    fn network_view(&self) -> NetworkView;
+
     /// Every peer this instance knows about, in `PeerId` order, each with the
     /// presence derived at the moment of the call.
     fn known_peers(&self) -> Vec<KnownPeerView>;

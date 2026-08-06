@@ -50,7 +50,29 @@ fn saving_replaces_the_stored_set_rather_than_appending() {
 }
 
 #[test]
-fn a_cache_entry_is_built_from_a_roster_entry() {
+fn a_cache_entry_is_built_from_a_roster_entry_that_produced_evidence() {
+    let mut roster = PeerRoster::for_local_peer(test_peers::alice());
+    roster
+        .record_discovery(
+            test_peers::bob(),
+            vec![endpoint("/ip4/198.51.100.7/udp/4001/quic-v1")],
+            T0,
+        )
+        .unwrap();
+    roster.record_heartbeat(test_peers::bob(), T0).unwrap();
+    let entry: &KnownPeer = roster.peer(&test_peers::bob()).unwrap();
+
+    assert_eq!(CachedPeer::of(entry), Some(cached_bob()));
+}
+
+#[test]
+fn a_peer_that_has_only_been_talked_about_is_not_cacheable() {
+    // This case used to produce a cache entry dated with the instant we were
+    // *told about* the peer. The roster is fed by mDNS and Kademlia, the cache
+    // is written to disk, and the first bootstrap rung dials what it finds
+    // there next launch — so that entry handed whoever published the record the
+    // head of the dial queue, with a fabricated last-seen instant to make it
+    // look recent (canvas D8, S5).
     let mut roster = PeerRoster::for_local_peer(test_peers::alice());
     roster
         .record_discovery(
@@ -61,7 +83,7 @@ fn a_cache_entry_is_built_from_a_roster_entry() {
         .unwrap();
     let entry: &KnownPeer = roster.peer(&test_peers::bob()).unwrap();
 
-    assert_eq!(CachedPeer::of(entry), cached_bob());
+    assert_eq!(CachedPeer::of(entry), None);
 }
 
 #[test]

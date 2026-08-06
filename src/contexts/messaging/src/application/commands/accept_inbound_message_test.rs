@@ -353,6 +353,11 @@ fn the_arrival_instant_comes_from_this_peers_clock_and_not_the_authors_claim() {
         .with_settings(settings)
         .build();
 
+    // 1 first, so the sweep abandons a run that genuinely was in flight rather
+    // than merely establishing where bob's stream starts here (D10).
+    context
+        .accept(broadcast_from(test_peers::bob(), 1, "first", AUTHOR_CLAIM))
+        .expect("applied");
     context
         .accept(broadcast_from(
             test_peers::bob(),
@@ -371,7 +376,7 @@ fn the_arrival_instant_comes_from_this_peers_clock_and_not_the_authors_claim() {
     assert_eq!(closed.len(), 1, "the local arrival aged, so the gap closed");
     assert_eq!(
         context.visible_text(ConversationId::Broadcast),
-        vec!["from the future"]
+        vec!["first", "from the future"]
     );
 }
 

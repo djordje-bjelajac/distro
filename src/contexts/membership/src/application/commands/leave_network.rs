@@ -20,13 +20,29 @@ pub struct LeaveNetwork;
 /// # Order, and why it is the order
 ///
 /// 1. Close every live session, announcing each established one.
-/// 2. Save the roster's peers for the next launch's first bootstrap rung (D1).
+/// 2. Save the peers that have **produced evidence** for the next launch's
+///    first bootstrap rung (D1, D8).
 /// 3. Announce the departure.
 ///
 /// `NetworkLeft` goes last so no consumer sees the network left while it still
 /// believes a link is live. The cache is written before it because the save is
 /// the whole point of leaving cleanly: it is what keeps the join ticket a
 /// one-time cost on this machine.
+///
+/// # Only peers that answered are written to disk
+///
+/// The roster is fed by mDNS and Kademlia, both of which report identities on a
+/// third party's say-so. What this step writes is read back by the **first**
+/// rung of the next launch's ladder and dialled ahead of the LAN, so caching an
+/// identity this peer was merely told about hands whoever published that record
+/// the head of the dial queue — and it survives restarts, which no in-memory
+/// roster entry does (canvas D8, safeguard S5).
+///
+/// The filter is [`CachedPeer::of`], which answers `None` for an entry with no
+/// evidence because there is no honest instant to store for one. Dropping those
+/// is not a loss of a warm start: an address that has never answered is not a
+/// warm start, and the LAN and ticket rungs still exist for a machine whose
+/// cache comes back empty.
 ///
 /// # This is a decision, not an observation
 ///
@@ -74,7 +90,7 @@ impl LeaveNetworkHandler {
 
         let peers: Vec<CachedPeer> = self
             .state
-            .read(|roster| roster.known_peers().map(CachedPeer::of).collect());
+            .read(|roster| roster.known_peers().filter_map(CachedPeer::of).collect());
         let cache_failure = self.cache.save(&peers).err();
 
         let left = NetworkLeft { at };

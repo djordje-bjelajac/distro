@@ -4,14 +4,14 @@ use shared_types::PeerId;
 
 use crate::application::MembershipState;
 use crate::application::queries::{
-    GetNetworkStatus, GetNetworkStatusHandler, ListKnownPeers, ListKnownPeersHandler,
-    ListOnlinePeers, ListOnlinePeersHandler,
+    GetNetworkStatus, GetNetworkStatusHandler, GetNetworkView, GetNetworkViewHandler,
+    ListKnownPeers, ListKnownPeersHandler, ListOnlinePeers, ListOnlinePeersHandler,
 };
 use crate::domain::{LivenessWindows, NetworkStatus};
-use crate::ports::{ClockPort, KnownPeerView, MembershipQueryPort};
+use crate::ports::{ClockPort, KnownPeerView, MembershipQueryPort, NetworkView};
 
 /// The read half of this context's inbound surface: one
-/// [`MembershipQueryPort`] implementation over the three query handlers.
+/// [`MembershipQueryPort`] implementation over the query handlers.
 ///
 /// It holds handlers rather than reimplementing them, so each read model keeps
 /// its own file and its own tests; this type adds only the translation from
@@ -23,6 +23,7 @@ use crate::ports::{ClockPort, KnownPeerView, MembershipQueryPort};
 /// lock through the read accessor only.
 #[derive(Clone)]
 pub struct MembershipQueryService {
+    network_view: GetNetworkViewHandler,
     known_peers: ListKnownPeersHandler,
     online_peers: ListOnlinePeersHandler,
     network_status: GetNetworkStatusHandler,
@@ -37,6 +38,11 @@ impl MembershipQueryService {
         windows: LivenessWindows,
     ) -> Self {
         Self {
+            network_view: GetNetworkViewHandler::new(
+                Arc::clone(&state),
+                Arc::clone(&clock),
+                windows,
+            ),
             known_peers: ListKnownPeersHandler::new(
                 Arc::clone(&state),
                 Arc::clone(&clock),
@@ -49,6 +55,10 @@ impl MembershipQueryService {
 }
 
 impl MembershipQueryPort for MembershipQueryService {
+    fn network_view(&self) -> NetworkView {
+        self.network_view.handle(GetNetworkView)
+    }
+
     fn known_peers(&self) -> Vec<KnownPeerView> {
         self.known_peers.handle(ListKnownPeers)
     }

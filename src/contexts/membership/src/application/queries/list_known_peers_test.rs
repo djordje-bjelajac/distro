@@ -15,7 +15,9 @@ fn endpoint(address: &str) -> Endpoint {
     Endpoint::direct(address).expect("test address is well formed")
 }
 
-/// `alice`'s state, knowing `bob` (with a session) and `carol` (without one).
+/// `alice`'s state, knowing `bob` (who completed a handshake, and so has both a
+/// session and evidence of life at `T0`) and `carol` (who was named by a
+/// discovery and has done nothing since).
 fn populated_state() -> Arc<MembershipState> {
     let state = Arc::new(MembershipState::for_local_peer(test_peers::alice()));
     state.modify(|roster| {
@@ -78,7 +80,11 @@ fn a_view_carries_the_endpoints_session_and_evidence_the_ui_renders() {
     assert_eq!(bob.endpoints, vec![endpoint("/ip4/198.51.100.7/udp/4001")]);
     assert_eq!(bob.session, Some(SessionState::Established));
     assert!(bob.is_connected());
-    assert_eq!(bob.last_seen_at, T0);
+    assert_eq!(
+        bob.last_seen_at,
+        Some(T0),
+        "the handshake instant, which is the one thing bob actually did"
+    );
 }
 
 #[test]
@@ -97,40 +103,52 @@ fn a_peer_without_a_session_is_known_but_not_connected() {
         !carol.is_connected(),
         "discovery says where a peer is, never that it is reachable"
     );
+    assert_eq!(
+        carol.last_seen_at, None,
+        "and the instant we were told about her is not an instant she was seen at"
+    );
+    assert_eq!(carol.presence, Presence::Unknown);
 }
 
 #[test]
 fn presence_is_derived_at_read_time_from_the_clock() {
+    // The ladder is an ageing of one measurement, so it needs a peer that
+    // produced one. This used to assert that carol — discovered, never heard
+    // from — walked Online → Stale → Offline alongside bob, which is the defect:
+    // it aged an instant she never produced. Both halves are asserted now, and
+    // the second is the stronger claim: the clock moves bob down the ladder and
+    // cannot put carol on it at all (canvas D1, invariant 4).
     let state = populated_state();
     let clock = Arc::new(ManualClock::starting_at(T0));
     let handler = handler_over(&state, &clock);
 
-    let fresh: Vec<_> = handler
-        .handle(ListKnownPeers)
-        .iter()
-        .map(|view| view.presence)
-        .collect();
-    assert_eq!(fresh, vec![Presence::Online, Presence::Online]);
+    let presence_of = |peer| {
+        handler
+            .handle(ListKnownPeers)
+            .into_iter()
+            .find(|view| view.peer == peer)
+            .expect("peer is known")
+            .presence
+    };
+
+    assert_eq!(presence_of(test_peers::bob()), Presence::Online);
+    assert_eq!(presence_of(test_peers::carol()), Presence::Unknown);
 
     clock.advance(DurationMillis::from_secs(40));
-    let stale: Vec<_> = handler
-        .handle(ListKnownPeers)
-        .iter()
-        .map(|view| view.presence)
-        .collect();
     assert_eq!(
-        stale,
-        vec![Presence::Stale, Presence::Stale],
+        presence_of(test_peers::bob()),
+        Presence::Stale,
         "the roster changed nothing; only the clock moved"
     );
+    assert_eq!(presence_of(test_peers::carol()), Presence::Unknown);
 
     clock.advance(DurationMillis::from_secs(40));
-    let offline: Vec<_> = handler
-        .handle(ListKnownPeers)
-        .iter()
-        .map(|view| view.presence)
-        .collect();
-    assert_eq!(offline, vec![Presence::Offline, Presence::Offline]);
+    assert_eq!(presence_of(test_peers::bob()), Presence::Offline);
+    assert_eq!(
+        presence_of(test_peers::carol()),
+        Presence::Unknown,
+        "Unknown is not a rung on the ladder, so no amount of time walks off it"
+    );
 }
 
 #[test]

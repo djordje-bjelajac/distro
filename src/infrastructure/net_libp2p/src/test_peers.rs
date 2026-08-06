@@ -59,3 +59,32 @@ pub(crate) fn carol() -> PeerId {
 fn peer(bytes: [u8; 32]) -> PeerId {
     PeerId::from_public_key_bytes(bytes).expect("RFC 8032 vector is a valid public key")
 }
+
+/// `count` distinct peers, for the tests that need more identities than the
+/// three named fixtures provide — a bound is only shown to hold by exceeding
+/// it.
+///
+/// Deterministic and RNG-free: candidate encodings are enumerated from a
+/// counter and the ones that decode to a curve point are kept, so the same call
+/// always yields the same peers in the same order. Roughly half of all 32-byte
+/// strings are valid encodings, so this costs about `2 * count` attempts and no
+/// crypto beyond the decoding [`PeerId`] already performs.
+///
+/// The returned order is *insertion* order, not [`PeerId`] order — a test that
+/// cares about ordering must sort or assert it explicitly.
+pub(crate) fn synthetic(count: usize) -> Vec<PeerId> {
+    let mut peers = Vec::with_capacity(count);
+    let mut candidate: u64 = 0;
+
+    while peers.len() < count {
+        let mut bytes = [0_u8; PeerId::LENGTH];
+        bytes[..8].copy_from_slice(&candidate.to_le_bytes());
+        candidate += 1;
+
+        if let Ok(peer) = PeerId::from_public_key_bytes(bytes) {
+            peers.push(peer);
+        }
+    }
+
+    peers
+}

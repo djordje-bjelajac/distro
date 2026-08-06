@@ -14,9 +14,9 @@ use messaging::domain::{
 use messaging::ports::{InboundEnvelopePort, InboundVerdict, MessagingCommandError};
 use shared_types::{Envelope, EnvelopeSignature, PayloadKind, PeerId, ProtocolVersion};
 
-use crate::composition::{DeliveryIndex, Diagnostics, LocalEndpoints, NoticeFeed};
-use crate::runtime::EventRouter;
-use crate::test_peers::{alice, bob};
+use crate::composition::{DeliveryIndex, Diagnostics, HeartbeatLedger, LocalEndpoints, NoticeFeed};
+use crate::runtime::{EventRouter, EventRouterParts};
+use crate::test_peers::{alice, bob, carol};
 
 /// Everything the router called, in order — the whole point of the type under
 /// test is *which* calls it makes and in what sequence.
@@ -168,32 +168,51 @@ struct Harness {
     recorder: Arc<Recorder>,
     endpoints: Arc<LocalEndpoints>,
     deliveries: Arc<DeliveryIndex>,
+    heartbeats: Arc<HeartbeatLedger>,
     diagnostics: Arc<Diagnostics>,
     notices: Arc<NoticeFeed>,
     router: EventRouter,
+}
+
+impl Harness {
+    /// The calls the router made, minus the evidence it reports for every
+    /// acknowledgement.
+    ///
+    /// Used only where a test is about *which message moved*: the heartbeat is
+    /// asserted on its own, next to the assertions it would otherwise clutter.
+    fn deliveries_reported(&self) -> Vec<Call> {
+        self.recorder
+            .calls()
+            .into_iter()
+            .filter(|call| !matches!(call, Call::Heartbeat(_)))
+            .collect()
+    }
 }
 
 fn harness() -> Harness {
     let recorder = Arc::new(Recorder::default());
     let endpoints = Arc::new(LocalEndpoints::new());
     let deliveries = Arc::new(DeliveryIndex::new());
+    let heartbeats = Arc::new(HeartbeatLedger::new());
     let diagnostics = Arc::new(Diagnostics::default());
     let notices = Arc::new(NoticeFeed::new());
 
-    let router = EventRouter::new(
-        Arc::clone(&recorder) as Arc<_>,
-        Arc::clone(&recorder) as Arc<_>,
-        Arc::clone(&recorder) as Arc<_>,
-        Arc::clone(&endpoints),
-        Arc::clone(&deliveries),
-        Arc::clone(&diagnostics),
-        Arc::clone(&notices),
-    );
+    let router = EventRouter::new(EventRouterParts {
+        sessions: Arc::clone(&recorder) as Arc<_>,
+        inbound: Arc::clone(&recorder) as Arc<_>,
+        discovery: Arc::clone(&recorder) as Arc<_>,
+        endpoints: Arc::clone(&endpoints),
+        deliveries: Arc::clone(&deliveries),
+        heartbeats: Arc::clone(&heartbeats),
+        diagnostics: Arc::clone(&diagnostics),
+        notices: Arc::clone(&notices),
+    });
 
     Harness {
         recorder,
         endpoints,
         deliveries,
+        heartbeats,
         diagnostics,
         notices,
         router,
@@ -424,7 +443,41 @@ fn an_acknowledged_direct_message_is_marked_delivered_by_signature() {
         signature,
     });
 
-    assert_eq!(harness.recorder.calls(), vec![Call::Delivered(message)]);
+    // Two calls now, in this order: the acknowledgement is evidence about the
+    // peer *before* it is news about the message (canvas `0010` D6).
+    assert_eq!(
+        harness.recorder.calls(),
+        vec![Call::Heartbeat(bob()), Call::Delivered(message)]
+    );
+}
+
+#[test]
+fn an_acknowledgement_is_evidence_of_life_before_it_is_correlated() {
+    // D6. The recipient's process produced an application-level
+    // acknowledgement, which is an act by the subject observed here — the only
+    // kind of evidence invariant 1 admits. It is reported first because whether
+    // the message is still correlatable is a fact about this root's
+    // bookkeeping, not about the peer.
+    let harness = harness();
+    let signature = EnvelopeSignature::new([9; EnvelopeSignature::LENGTH]);
+    harness.deliveries.record(
+        signature,
+        MessageId::new(
+            alice(),
+            ConversationId::Direct(bob()),
+            SequenceNumber::FIRST,
+        ),
+    );
+
+    harness.router.route(NetworkEvent::DirectMessageDelivered {
+        peer: bob(),
+        signature,
+    });
+
+    assert_eq!(
+        harness.recorder.calls().first(),
+        Some(&Call::Heartbeat(bob()))
+    );
 }
 
 #[test]
@@ -438,8 +491,140 @@ fn an_acknowledgement_for_an_unknown_signature_is_counted_and_nothing_is_marked(
         signature: EnvelopeSignature::new([9; EnvelopeSignature::LENGTH]),
     });
 
-    assert!(harness.recorder.calls().is_empty());
+    assert!(harness.deliveries_reported().is_empty());
     assert_eq!(harness.diagnostics.uncorrelated_reports(), 1);
+}
+
+#[test]
+fn an_acknowledgement_is_evidence_even_when_it_correlates_to_no_message() {
+    // The half of D6 that is easy to lose. An acknowledgement whose message was
+    // evicted is a weaker fact about the *message* and exactly as strong a fact
+    // about the *peer*: something the peer's process did arrived here. Making
+    // the evidence conditional on the index would let a busy sender's own
+    // eviction policy decide whether its peers look alive.
+    let harness = harness();
+
+    harness.router.route(NetworkEvent::DirectMessageDelivered {
+        peer: bob(),
+        signature: EnvelopeSignature::new([9; EnvelopeSignature::LENGTH]),
+    });
+
+    assert_eq!(harness.recorder.calls(), vec![Call::Heartbeat(bob())]);
+}
+
+#[test]
+fn a_heartbeats_acknowledgement_is_evidence_and_is_not_a_delivered_message() {
+    // S6. Since D7 a heartbeat travels as a direct message, so the transport
+    // answers for it with this very event. It is evidence — that is the round
+    // trip the move was made for — and it is nothing else: no message moves,
+    // and it is not the "uncorrelated report" the index would call it, because
+    // nothing about it is uncorrelated.
+    let harness = harness();
+    let signature = EnvelopeSignature::new([42; EnvelopeSignature::LENGTH]);
+    harness.heartbeats.record(signature);
+
+    harness.router.route(NetworkEvent::DirectMessageDelivered {
+        peer: bob(),
+        signature,
+    });
+
+    assert_eq!(harness.recorder.calls(), vec![Call::Heartbeat(bob())]);
+    assert!(
+        !harness
+            .recorder
+            .calls()
+            .iter()
+            .any(|call| matches!(call, Call::Delivered(_))),
+        "a heartbeat names no message and has no delivery state to move"
+    );
+    assert_eq!(harness.diagnostics.uncorrelated_reports(), 0);
+}
+
+#[test]
+fn one_heartbeat_signature_answers_for_every_peer_in_the_round() {
+    // One round signs one envelope and sends it to every linked peer, so the
+    // same signature comes back once per peer. A consuming lookup would
+    // recognise the first and let the rest fall through to the message path.
+    let harness = harness();
+    let signature = EnvelopeSignature::new([42; EnvelopeSignature::LENGTH]);
+    harness.heartbeats.record(signature);
+
+    harness.router.route(NetworkEvent::DirectMessageDelivered {
+        peer: bob(),
+        signature,
+    });
+    harness.router.route(NetworkEvent::DirectMessageDelivered {
+        peer: carol(),
+        signature,
+    });
+
+    assert_eq!(
+        harness.recorder.calls(),
+        vec![Call::Heartbeat(bob()), Call::Heartbeat(carol())]
+    );
+    assert_eq!(harness.diagnostics.uncorrelated_reports(), 0);
+}
+
+#[test]
+fn a_heartbeat_that_is_never_acknowledged_is_counted_and_says_nothing_else() {
+    // S6, and the notice this whole separation exists to prevent: without it
+    // this event reaches the branch below and tells the user "a message to X
+    // was not delivered" — every ten seconds, about a message they never sent.
+    //
+    // No notice, and no presence claim in either direction: the absence of an
+    // acknowledgement is not evidence of death, and presence ages out on its
+    // own evidence.
+    let harness = harness();
+    let signature = EnvelopeSignature::new([42; EnvelopeSignature::LENGTH]);
+    harness.heartbeats.record(signature);
+
+    harness.router.route(NetworkEvent::DirectMessageFailed {
+        peer: bob(),
+        signature,
+        reason: DirectMessageFailure::NotAcknowledged,
+    });
+
+    assert_eq!(harness.diagnostics.heartbeats_unacknowledged(), 1);
+    assert!(
+        harness.notices.all().is_empty(),
+        "a heartbeat nobody answered is not news a user can act on: {:?}",
+        harness.notices.all()
+    );
+    assert!(
+        harness.recorder.calls().is_empty(),
+        "no port was called — least of all one that would claim the peer is gone"
+    );
+    assert_eq!(
+        harness.diagnostics.direct_delivery_failures(),
+        0,
+        "a heartbeat is not a message, so no message's delivery failed"
+    );
+    assert_eq!(harness.diagnostics.uncorrelated_reports(), 0);
+}
+
+#[test]
+fn a_failed_heartbeat_leaves_a_real_messages_correlation_alone() {
+    // The heartbeat check runs before the index is consulted, so it must not
+    // reach into it. A pending message that shared the round must still be
+    // answerable.
+    let harness = harness();
+    let heartbeat = EnvelopeSignature::new([42; EnvelopeSignature::LENGTH]);
+    let sent = EnvelopeSignature::new([9; EnvelopeSignature::LENGTH]);
+    let message = MessageId::new(
+        alice(),
+        ConversationId::Direct(bob()),
+        SequenceNumber::FIRST,
+    );
+    harness.heartbeats.record(heartbeat);
+    harness.deliveries.record(sent, message);
+
+    harness.router.route(NetworkEvent::DirectMessageFailed {
+        peer: bob(),
+        signature: heartbeat,
+        reason: DirectMessageFailure::NotAcknowledged,
+    });
+
+    assert_eq!(harness.deliveries.take(&sent), Some(message));
 }
 
 #[test]
@@ -464,7 +649,19 @@ fn a_signature_is_answered_once_even_if_the_network_reports_twice() {
         signature,
     });
 
-    assert_eq!(harness.recorder.calls().len(), 1);
+    assert_eq!(harness.deliveries_reported().len(), 1);
+    // The second report is still evidence: the peer acknowledged something
+    // twice, and the index having consumed the correlation is this root's
+    // bookkeeping rather than a fact about the peer (D6).
+    assert_eq!(
+        harness
+            .recorder
+            .calls()
+            .iter()
+            .filter(|call| matches!(call, Call::Heartbeat(_)))
+            .count(),
+        2
+    );
 }
 
 #[test]
@@ -789,5 +986,8 @@ fn a_delivered_message_cannot_then_be_failed_by_a_late_report() {
         reason: DirectMessageFailure::NotAcknowledged,
     });
 
-    assert_eq!(harness.recorder.calls(), vec![Call::Delivered(message)]);
+    assert_eq!(
+        harness.deliveries_reported(),
+        vec![Call::Delivered(message)]
+    );
 }

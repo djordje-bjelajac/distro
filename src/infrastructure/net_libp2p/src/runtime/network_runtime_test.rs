@@ -279,6 +279,21 @@ fn two_peers_on_loopback_hold_a_session_and_exchange_messages() {
         broadcast
     );
 
+    // **The propagated half of A6.** The same call site, the same message, and
+    // a different outcome depending on whether anyone was there to take it —
+    // which is precisely what `→ published` could not say. The empty half is
+    // asserted in `swarm/network_driver_test.rs`, where a lone peer can be held
+    // in that state; here a peer is genuinely reachable, so the publish that
+    // landed above is counted as having gone somewhere.
+    //
+    // `>= 1` rather than `== 1` because the loop above republishes until gossip
+    // has meshed: the attempts before that found nobody subscribed, which is
+    // the other counter, and only the last one propagated.
+    assert!(
+        bob.runtime.diagnostics().broadcasts_propagated() >= 1,
+        "the broadcast alice received is counted as having reached somebody"
+    );
+
     // ----------------------------------------------------------------- close
 
     bob.transport
@@ -434,6 +449,12 @@ fn a_peer_with_nowhere_to_dial_is_refused_rather_than_left_hanging() {
 fn publishing_to_a_broadcast_channel_nobody_is_listening_to_is_success() {
     // A peer alone on the network is `Isolated`, not broken — the same rule the
     // simulated fabric applies, so the two adapters agree behaviourally.
+    //
+    // Success, and not silence (canvas `0010` D11). The port keeps returning
+    // `Ok`, because a lone peer publishing is a state rather than a failure and
+    // no caller should have to treat it as a fault; what changed is that the
+    // outcome is no longer indistinguishable from a message that reached five
+    // peers.
     let alice = peer_or_skip!(ALICE_SECRET_KEY);
     alice.transport.listen().expect("alice listens");
 
@@ -446,6 +467,14 @@ fn publishing_to_a_broadcast_channel_nobody_is_listening_to_is_success() {
         Ok(())
     );
 
+    let diagnostics = alice.runtime.diagnostics();
+    assert_eq!(diagnostics.broadcasts_reaching_nobody(), 1);
+    assert_eq!(
+        diagnostics.broadcasts_propagated(),
+        0,
+        "nothing was handed to anybody, and nothing claims it was (A6)"
+    );
+
     alice.runtime.shutdown();
 }
 
@@ -453,6 +482,11 @@ fn publishing_to_a_broadcast_channel_nobody_is_listening_to_is_success() {
 fn observing_peers_on_an_empty_network_is_success_and_not_an_error() {
     let alice = peer_or_skip!(ALICE_SECRET_KEY);
 
+    // Asked twice, through the real port adapter and the real command channel:
+    // an empty answer is success on every join, not only the first (A7). What
+    // the *non*-empty case answers on a second read is asserted in
+    // `swarm/network_driver_test.rs`, where a sighting can be supplied.
+    assert_eq!(alice.discovery.observe_peers(), Ok(Vec::new()));
     assert_eq!(alice.discovery.observe_peers(), Ok(Vec::new()));
 
     alice.runtime.shutdown();

@@ -31,8 +31,27 @@ fn a_multi_peer_scenario_renders_a_byte_identical_trace_across_two_runs() {
         "the reference scenario stopped exercising the system:\n{first}"
     );
     assert!(
-        first.contains("message-gap-closed") && first.contains("peer-presence-expired"),
-        "the reference scenario stopped covering the clock-driven sweeps:\n{first}"
+        first.contains("peer-presence-expired"),
+        "the reference scenario stopped covering the presence sweep:\n{first}"
+    );
+
+    // The gap sweep, and specifically the half of it that is still loss. Since
+    // D10 a first sighting part-way through an author's run *establishes the
+    // origin* and reports nothing, so a scenario can drift into covering only
+    // that and leave the abandon-a-real-range path — the one AC15 is about —
+    // untested while still containing the words `message-gap-closed`. A range
+    // starting at 2 or above is a run between two sequences the log actually
+    // observed, which is the only kind D10 still calls loss (canvas `0010` A2).
+    let abandoned: Vec<&str> = first
+        .lines()
+        .filter(|line| line.contains("message-gap-closed"))
+        .collect();
+    assert!(
+        abandoned
+            .iter()
+            .any(|line| line.contains("range=") && !line.contains("range=1..=")),
+        "the reference scenario stopped covering a genuinely abandoned range; \
+         gap closes seen: {abandoned:?}\n{first}"
     );
 }
 
@@ -69,6 +88,20 @@ fn reference_run(seed: u64) -> String {
         .expect("the publisher is healthy");
     net.settle();
     net.boot(dave);
+
+    // One clean broadcast before anything is scrambled, so every listener's
+    // stream has a floor.
+    //
+    // Without it the corrupted message below is the first sequence its
+    // recipient ever sees from alice, which since D10 *establishes the origin*
+    // rather than opening a gap — the sweep would then have nothing to abandon
+    // and this scenario would quietly stop covering the clock-driven gap close
+    // it exists to pin (canvas `0010` D10, A1/A2). The guard in the test above
+    // fails loudly if that happens again.
+    net.peer(alice)
+        .publish_broadcast("before anything went wrong")
+        .expect("gossip accepts it");
+    net.settle();
 
     // Scrambled gossip from the seeded stream, with one message duplicated and
     // one signature corrupted in flight.

@@ -49,7 +49,12 @@ fn a_gap_younger_than_the_window_is_left_alone() {
 #[test]
 fn an_aged_gap_is_abandoned_and_the_range_is_named() {
     // AC15: an abandoned gap is visible and counted, never a silent skip.
+    // 1 first, so 2 is a run between two sequences this peer observed and is
+    // genuinely loss — below a first sight there is no gap at all (D10).
     let context = alice();
+    context
+        .accept(broadcast_from(test_peers::bob(), 1, "first", CLAIMED_AT))
+        .expect("applied");
     context
         .accept(broadcast_from(test_peers::bob(), 3, "third", CLAIMED_AT))
         .expect("buffered");
@@ -60,9 +65,33 @@ fn an_aged_gap_is_abandoned_and_the_range_is_named() {
     assert_eq!(closed.len(), 1);
     assert_eq!(closed[0].conversation, ConversationId::Broadcast);
     assert_eq!(closed[0].author, test_peers::bob());
-    assert_eq!(closed[0].from, seq(1));
+    assert_eq!(closed[0].from, seq(2));
     assert_eq!(closed[0].to, seq(2));
     assert_eq!(closed[0].cause, GapCloseCause::ToleranceElapsed);
+}
+
+#[test]
+fn a_first_sight_part_way_through_an_authors_run_abandons_nothing() {
+    // D10/A1: this peer joined late, AC10 gives it no history, so 1 and 2 were
+    // never in flight to it. The sweep starts bob's stream at 3 and reports no
+    // loss — while still releasing what it held.
+    let context = alice();
+    context
+        .accept(broadcast_from(test_peers::bob(), 3, "third", CLAIMED_AT))
+        .expect("buffered");
+
+    context.clock.advance(TOLERANCE_MILLIS);
+
+    assert_eq!(sweep(&context), Vec::new());
+    assert_eq!(
+        context.visible_text(ConversationId::Broadcast),
+        vec!["third"]
+    );
+    assert_eq!(
+        context.mirrored(ConversationId::Broadcast).len(),
+        1,
+        "the released message is mirrored even though nothing was abandoned"
+    );
 }
 
 #[test]
@@ -107,16 +136,26 @@ fn the_abandoned_range_is_announced_before_what_it_released() {
     // order would make a consumer reason backwards from a hole it had drawn.
     let context = alice();
     context
+        .accept(broadcast_from(test_peers::bob(), 1, "first", CLAIMED_AT))
+        .expect("applied");
+    context
         .accept(broadcast_from(test_peers::bob(), 3, "third", CLAIMED_AT))
         .expect("buffered");
     context.clock.advance(TOLERANCE_MILLIS);
+    let before = context.events().len();
 
     sweep(&context);
 
     let events = context.events();
-    assert!(matches!(events[0], MessagingEvent::MessageGapClosed(_)));
-    assert!(matches!(events[1], MessagingEvent::MessageReceived(_)));
-    assert_eq!(events.len(), 2);
+    assert!(matches!(
+        events[before],
+        MessagingEvent::MessageGapClosed(_)
+    ));
+    assert!(matches!(
+        events[before + 1],
+        MessagingEvent::MessageReceived(_)
+    ));
+    assert_eq!(events.len(), before + 2);
 }
 
 #[test]
@@ -167,6 +206,11 @@ fn each_authors_gap_is_judged_on_its_own_arrival() {
     // Sequence numbers are per (author, conversation) and never interact: one
     // author's silence must not close another's gap.
     let context = alice();
+    for author in [test_peers::bob(), test_peers::carol()] {
+        context
+            .accept(broadcast_from(author, 1, "first", CLAIMED_AT))
+            .expect("applied");
+    }
     context
         .accept(broadcast_from(
             test_peers::bob(),
@@ -189,9 +233,16 @@ fn each_authors_gap_is_judged_on_its_own_arrival() {
 
     assert_eq!(closed.len(), 1);
     assert_eq!(closed[0].author, test_peers::bob());
-    assert_eq!(
-        context.visible_text(ConversationId::Broadcast),
-        vec!["bob third"]
+    assert!(
+        context
+            .visible_text(ConversationId::Broadcast)
+            .contains(&"bob third".to_owned())
+    );
+    assert!(
+        !context
+            .visible_text(ConversationId::Broadcast)
+            .contains(&"carol third".to_owned()),
+        "carol's gap has not aged yet"
     );
 }
 
@@ -200,6 +251,14 @@ fn a_direct_conversations_gap_closes_by_the_same_rule() {
     // Rule R is identical for `Broadcast` and `Direct`.
     let context = alice();
     let conversation = ConversationId::Direct(test_peers::bob());
+    context
+        .accept(crate::application::test_context::direct_from(
+            test_peers::bob(),
+            1,
+            "first",
+            CLAIMED_AT,
+        ))
+        .expect("applied");
     context
         .accept(crate::application::test_context::direct_from(
             test_peers::bob(),
@@ -214,9 +273,9 @@ fn a_direct_conversations_gap_closes_by_the_same_rule() {
 
     assert_eq!(closed.len(), 1);
     assert_eq!(closed[0].conversation, conversation);
-    assert_eq!(closed[0].from, seq(1));
+    assert_eq!(closed[0].from, seq(2));
     assert_eq!(closed[0].to, seq(3));
-    assert_eq!(context.visible_text(conversation), vec!["fourth"]);
+    assert_eq!(context.visible_text(conversation), vec!["first", "fourth"]);
 }
 
 #[test]

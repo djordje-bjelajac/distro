@@ -8,7 +8,7 @@
 //! their tests free of real time (AC13) — and it means somebody has to be the
 //! thing that calls them. This module is that somebody.
 //!
-//! Four of its parts are pure enough to test on their own, and each of them is
+//! Five of its parts are pure enough to test on their own, and each of them is
 //! a place a composition root usually gets something quietly wrong:
 //!
 //! * [`EventRouter`] — the `NetworkEvent` → inbound-port correspondence, which
@@ -21,11 +21,13 @@
 //! * [`delivery_failure_of`] — the transport's failure vocabulary translated
 //!   into the domain's, which no crate below the root can do because neither
 //!   knows about the other.
+//! * [`linked_peers`] — who a heartbeat goes to, which is the selection canvas
+//!   `0010` D4 names as the mirror of the defect it fixes.
 //!
 //! [`Engine`] is the loop that puts them together. It is deliberately the only
 //! part with no unit test of its own: it owns a thread, a network, and a
 //! blocking wait, and everything about it that is a decision has been moved
-//! into one of the four above.
+//! into one of the five above.
 
 mod delivery_failure_mapping;
 #[cfg(test)]
@@ -38,6 +40,9 @@ mod event_router_test;
 mod lifecycle_fanout;
 #[cfg(test)]
 mod lifecycle_fanout_test;
+mod linked_peers;
+#[cfg(test)]
+mod linked_peers_test;
 mod tick_schedule;
 #[cfg(test)]
 mod tick_schedule_test;
@@ -45,6 +50,7 @@ mod tick_schedule_test;
 pub use delivery_failure_mapping::{delivery_failure_of, transport_reason};
 pub use engine::{Engine, EngineHandle};
 pub use engine_command::EngineCommand;
-pub use event_router::EventRouter;
+pub use event_router::{EventRouter, EventRouterParts};
 pub use lifecycle_fanout::LifecycleFanout;
+pub use linked_peers::linked_peers;
 pub use tick_schedule::{DueTicks, TickSchedule};

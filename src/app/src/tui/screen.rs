@@ -1,3 +1,4 @@
+use membership::domain::{PeerStanding, Presence};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -143,13 +144,14 @@ fn draw_sidebar(frame: &mut Frame<'_>, area: Rect, state: &UiState, data: &Scree
                 ),
                 Span::raw(format!("{} ", row.link_mark())),
                 Span::raw(format!("{} ", row.label)),
+                // `presence_text` rather than the presence itself: a
+                // never-heard-from peer draws an empty cell, and a linked peer
+                // that has gone quiet draws `connected · not answering` rather
+                // than the bare `offline` that used to sit under a status line
+                // counting it (canvas §3, D5). The row is drawn either way.
                 Span::styled(
-                    row.presence.to_string(),
-                    Style::default().fg(match row.presence {
-                        membership::domain::Presence::Online => Color::Green,
-                        membership::domain::Presence::Stale => Color::Yellow,
-                        membership::domain::Presence::Offline => Color::DarkGray,
-                    }),
+                    row.presence_text(),
+                    Style::default().fg(presence_colour(row)),
                 ),
             ]))
         })
@@ -159,6 +161,29 @@ fn draw_sidebar(frame: &mut Frame<'_>, area: Rect, state: &UiState, data: &Scree
         List::new(roster).block(Block::default().borders(Borders::ALL).title("peers")),
         split[1],
     );
+}
+
+/// The colour of one roster row's presence cell.
+///
+/// Amber is for "look at this", not for "something failed". A linked peer that
+/// has stopped answering earns it — a session is being held open to a peer that
+/// is not responding, which is the one state in this column worth a user's
+/// attention. An unlinked peer that has gone quiet does not: it is a record
+/// that a peer exists, and a coloured column of them on a laptop that just woke
+/// up would report a fault where there is none (canvas §2.2, S7). A
+/// never-heard-from peer has no text to colour at all.
+const fn presence_colour(row: &RosterRow) -> Color {
+    match row.standing {
+        PeerStanding::Linked(Presence::Offline) => Color::Yellow,
+        PeerStanding::Linked(Presence::Online) | PeerStanding::Unlinked(Presence::Online) => {
+            Color::Green
+        }
+        PeerStanding::Linked(Presence::Stale) | PeerStanding::Unlinked(Presence::Stale) => {
+            Color::Yellow
+        }
+        PeerStanding::Linked(Presence::Unknown)
+        | PeerStanding::Unlinked(Presence::Unknown | Presence::Offline) => Color::DarkGray,
+    }
 }
 
 fn draw_conversation(frame: &mut Frame<'_>, area: Rect, data: &ScreenData<'_>) {

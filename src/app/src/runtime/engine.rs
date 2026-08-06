@@ -9,7 +9,9 @@ use messaging::ports::{InboundEnvelopePort, SendMessagePort};
 use shared_types::PeerId;
 
 use crate::composition::Node;
-use crate::runtime::{EngineCommand, EventRouter, LifecycleFanout, TickSchedule};
+use crate::runtime::{
+    EngineCommand, EventRouter, EventRouterParts, LifecycleFanout, TickSchedule, linked_peers,
+};
 
 /// The one thread that drains, fans out, and ticks.
 ///
@@ -65,17 +67,18 @@ impl Engine {
         // The services are cheap clones over shared state, which is what
         // `into_parts` on each context exists for: several owners, one roster
         // and one registry.
-        let router = EventRouter::new(
-            Arc::new(node.membership().sessions().clone())
+        let router = EventRouter::new(EventRouterParts {
+            sessions: Arc::new(node.membership().sessions().clone())
                 as Arc<dyn InboundSessionPort + Send + Sync>,
-            Arc::new(node.messaging().inbound().clone())
+            inbound: Arc::new(node.messaging().inbound().clone())
                 as Arc<dyn InboundEnvelopePort + Send + Sync>,
-            Arc::clone(node.discovery()),
-            Arc::clone(node.endpoints()),
-            Arc::clone(node.deliveries()),
-            Arc::clone(node.diagnostics()),
-            Arc::clone(node.notices()),
-        );
+            discovery: Arc::clone(node.discovery()),
+            endpoints: Arc::clone(node.endpoints()),
+            deliveries: Arc::clone(node.deliveries()),
+            heartbeats: Arc::clone(node.heartbeats()),
+            diagnostics: Arc::clone(node.diagnostics()),
+            notices: Arc::clone(node.notices()),
+        });
 
         let fanout = LifecycleFanout::new(
             Arc::new(node.messaging().lifecycle().clone())
@@ -193,16 +196,32 @@ impl Engine {
     }
 
     /// OP-10 emits no liveness probe by design, so the application does.
+    ///
+    /// One signed envelope to each peer holding an established session, and to
+    /// nobody else (canvas `0010` D7). The set comes from here rather than from
+    /// inside the beacon because this is where the query port and the tick
+    /// already are — a beacon that fetched its own roster would be a second
+    /// reader of state the root is already holding, at a second instant.
+    ///
+    /// A round with nobody in it is not a failure and is not counted as one:
+    /// an instance with no sessions has nobody to speak to, which is the
+    /// ordinary state of a fresh install on a quiet network.
     fn emit_heartbeat(&self) {
-        match self.node.beacon().emit() {
-            Ok(()) => self.node.diagnostics().count_heartbeat_sent(),
-            Err(_) => {
-                // Not worth a notice on every tick: a peer with no session has
-                // nowhere to publish, which is the ordinary state of an
-                // isolated instance rather than a fault. The counter is what
-                // tells an operator this peer is failing to speak.
-                self.node.diagnostics().count_heartbeat_failed();
-            }
+        let linked = linked_peers(&self.node.membership().queries().network_view());
+
+        match self.node.beacon().emit(&linked) {
+            Ok(round) => self
+                .node
+                .diagnostics()
+                .count_heartbeat_round(round.sent, round.refused),
+            // One envelope is drafted and signed for the whole round, so a
+            // signer refusal costs every linked peer its heartbeat. Not worth a
+            // notice on every tick — the counter is what tells an operator this
+            // peer is failing to speak rather than failing to hear.
+            Err(_) => self
+                .node
+                .diagnostics()
+                .count_heartbeat_round(0, linked.len() as u64),
         }
     }
 

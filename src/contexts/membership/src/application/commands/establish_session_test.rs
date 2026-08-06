@@ -86,6 +86,14 @@ fn a_completed_handshake_is_evidence_of_life() {
     let publisher = Arc::new(RecordingPublisher::new());
     clock.advance(DurationMillis::from_secs(7));
 
+    let last_seen_at =
+        || state.read(|roster| roster.peer(&test_peers::bob()).map(|e| e.last_seen_at()));
+    assert_eq!(
+        last_seen_at(),
+        Some(Some(T0)),
+        "the inbound open at T0 was itself evidence — a remote that dialled us just acted"
+    );
+
     handler_over(&state, &clock, &publisher)
         .handle(EstablishSession {
             peer: test_peers::bob(),
@@ -93,9 +101,10 @@ fn a_completed_handshake_is_evidence_of_life() {
         .expect("establish");
 
     assert_eq!(
-        state.read(|roster| roster.peer(&test_peers::bob()).map(|e| e.last_seen_at())),
-        Some(T0.saturating_add(DurationMillis::from_secs(7))),
-        "a remote that finished a handshake demonstrably just acted"
+        last_seen_at(),
+        Some(Some(T0.saturating_add(DurationMillis::from_secs(7)))),
+        "and the completed handshake is later evidence still: the remote used its \
+         secret key in a live exchange, which moves the instant forward"
     );
 }
 

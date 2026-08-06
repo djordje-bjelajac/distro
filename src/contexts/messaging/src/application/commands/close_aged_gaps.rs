@@ -1,5 +1,7 @@
 use std::sync::Arc;
 
+use shared_types::PeerId;
+
 use crate::application::{ConversationRegistry, MessageRecorder, MessagingSettings};
 use crate::domain::Message;
 use crate::domain::events::{MessageGapClosed, MessageReceived, MessagingEvent};
@@ -68,19 +70,26 @@ impl CloseAgedGapsHandler {
         let tolerance = self.settings.gap_tolerance;
 
         let swept = self.registry.sweep(|open| {
+            // What each author had applied before the sweep. The released run
+            // cannot be inferred from the abandoned ranges: a wait that ends by
+            // establishing an author's origin here releases everything that
+            // author had held and abandons nothing (D10), so inferring would
+            // drop exactly a late joiner's first messages.
+            let before: Vec<(PeerId, usize)> = open
+                .logs()
+                .map(|log| (log.author(), log.messages().len()))
+                .collect();
+
             let closed = open.close_aged_gaps(now, tolerance);
 
-            // Everything above an abandoned range is what the close made
-            // visible: before it, this author's applied run stopped below the
-            // range's start.
-            let released: Vec<Message> = closed
-                .iter()
-                .flat_map(|event| {
-                    open.messages_by(&event.author)
+            let released: Vec<Message> = open
+                .logs()
+                .flat_map(|log| {
+                    let applied_before = before
                         .iter()
-                        .filter(|message| message.sequence() > event.to)
-                        .cloned()
-                        .collect::<Vec<_>>()
+                        .find(|(author, _)| *author == log.author())
+                        .map_or(0, |(_, applied)| *applied);
+                    log.messages()[applied_before..].to_vec()
                 })
                 .collect();
 
@@ -90,7 +99,7 @@ impl CloseAgedGapsHandler {
         let mut all_closed = Vec::new();
 
         for (closed, released) in swept {
-            if closed.is_empty() {
+            if closed.is_empty() && released.is_empty() {
                 continue;
             }
 

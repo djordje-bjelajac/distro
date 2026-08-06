@@ -182,6 +182,16 @@ fn presence_expires_through_the_clock_and_the_query_side_agrees() {
             endpoints: vec![endpoint(CAROL_ADDRESS)],
         })
         .expect("observation");
+    assert_eq!(
+        queries.online_peers(),
+        Vec::new(),
+        "being observed by a discovery mechanism is not carol speaking (A3)"
+    );
+    assert_eq!(queries.known_peers()[0].presence, Presence::Unknown);
+
+    sessions
+        .peer_heartbeat(test_peers::carol())
+        .expect("carol speaks, over a link this instance does not hold");
     assert_eq!(queries.online_peers(), vec![test_peers::carol()]);
 
     w.clock.advance(DurationMillis::from_secs(61));
@@ -354,6 +364,10 @@ fn custom_liveness_windows_reach_both_the_sweep_and_the_read_model() {
             endpoints: vec![endpoint(CAROL_ADDRESS)],
         })
         .expect("observation");
+    context
+        .sessions()
+        .peer_heartbeat(test_peers::carol())
+        .expect("carol speaks: only a peer that has spoken can fall silent");
     clock.advance(DurationMillis::from_millis(200));
 
     assert_eq!(

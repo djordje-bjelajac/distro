@@ -44,6 +44,18 @@ pub struct PeerRoster {
 }
 
 impl PeerRoster {
+    /// Most peers retained at once.
+    ///
+    /// The cap exists because entries arrive from the network and, since a
+    /// never-heard-from peer is `Unknown` forever rather than expiring, nothing
+    /// else would ever remove them: one host publishing DHT records could grow
+    /// every roster in the network without limit (canvas D9, S5). The value is
+    /// an engineering default, not a rule: this app's networks run from a
+    /// handful of peers to low hundreds, so 1024 is far above any plausible
+    /// real membership while bounding an attacker's reach to roughly 1024
+    /// identities and their [`KnownPeer::MAX_ENDPOINTS`] addresses apiece.
+    pub const MAX_PEERS: usize = 1024;
+
     /// An empty roster belonging to `local`.
     pub const fn for_local_peer(local: PeerId) -> Self {
         Self {
@@ -84,35 +96,60 @@ impl PeerRoster {
             .count()
     }
 
-    /// Records that `peer` was discovered at `at`, reachable at `endpoints`.
+    /// Records where `peer` was reported to be reachable, and **nothing about
+    /// whether it is alive**.
     ///
     /// Returns [`PeerDiscovered`] only the first time the peer is seen; later
-    /// sightings merge new addresses and refresh the evidence of life, because
-    /// in a gossiping network the same peer is re-announced continually and
-    /// every announcement after the first carries no news.
+    /// sightings merge new addresses, because in a gossiping network the same
+    /// peer is re-announced continually and every announcement after the first
+    /// carries no news.
+    ///
+    /// # This method takes no evidence instant
+    ///
+    /// `recorded_at` is when *this roster wrote the entry down*. It is not
+    /// evidence and never reaches
+    /// [`presence`](crate::domain::KnownPeer::presence): it orders eviction
+    /// (D9) and dates [`PeerDiscovered`], and that is all.
+    ///
+    /// A discovery is a **third party's claim** (invariant 2). By the time a
+    /// sighting arrives here the driver has flattened mDNS and Kademlia into
+    /// one shape, an mDNS record is spoofable by any host on the link, and a
+    /// DHT record naming a peer is written by whoever felt like writing it.
+    /// Treating any of them as evidence let one host keep arbitrary victims
+    /// `Online` in every roster that learned the record, refreshed on every
+    /// re-announcement — so the *recurring* path here mattered even more than
+    /// the constructor (canvas D3, S2).
+    ///
+    /// *Accepted cost:* an mDNS sighting genuinely is the peer speaking, and
+    /// this discards that evidence. A LAN peer produces real evidence within
+    /// one heartbeat of being dialled, which is a cheap price for a rule with
+    /// no exceptions to get wrong. The precedent is
+    /// [`close_session`](Self::close_session), which takes no instant because a
+    /// close is not evidence of life.
     pub fn record_discovery(
         &mut self,
         peer: PeerId,
         endpoints: Vec<Endpoint>,
-        at: Millis,
+        recorded_at: Millis,
     ) -> Result<Option<PeerDiscovered>, PeerRosterError> {
         self.reject_local(peer)?;
         if endpoints.is_empty() {
             return Err(PeerRosterError::NoEndpoints);
         }
 
-        match self.peers.get_mut(&peer) {
-            Some(entry) => {
-                entry.merge_endpoints(endpoints);
-                entry.record_evidence(at);
-                Ok(None)
-            }
-            None => {
-                self.peers
-                    .insert(peer, KnownPeer::discovered(peer, endpoints, at));
-                Ok(Some(PeerDiscovered { peer, at }))
-            }
+        if let Some(entry) = self.peers.get_mut(&peer) {
+            entry.merge_endpoints(endpoints);
+            return Ok(None);
         }
+
+        self.make_room()?;
+        self.peers
+            .insert(peer, KnownPeer::discovered(peer, endpoints, recorded_at));
+
+        Ok(Some(PeerDiscovered {
+            peer,
+            at: recorded_at,
+        }))
     }
 
     /// Records evidence that `peer` was alive at `at`.
@@ -240,6 +277,16 @@ impl PeerRoster {
     ///
     /// A peer is reported once per silence. Fresh evidence re-arms it, so a
     /// peer that returns and goes quiet again expires again.
+    ///
+    /// # Only a peer that has produced evidence can expire
+    ///
+    /// A never-heard-from peer is skipped at every age and over any number of
+    /// sweeps (invariant 5). This is not a special case bolted on: the event
+    /// carries `last_evidence_at`, and for such a peer there is no honest value
+    /// to put there. `Unknown` is not on the path to `Offline` — its only exit
+    /// is evidence — so there is no silence to announce, and announcing one
+    /// would tell every consumer that a peer went away when nothing ever
+    /// arrived from it.
     pub fn expire_presence(
         &mut self,
         now: Millis,
@@ -248,17 +295,19 @@ impl PeerRoster {
         let mut expired = Vec::new();
 
         for entry in self.peers.values_mut() {
-            let presence = entry.presence(now, windows);
-            let newly_offline = presence.is_offline() && !entry.reported_presence().is_offline();
+            let Some(last_evidence_at) = entry.last_seen_at() else {
+                continue;
+            };
 
-            if newly_offline {
+            let offline = entry.presence(now, windows).is_offline();
+            if offline && !entry.expiry_announced() {
                 expired.push(PeerPresenceExpired {
                     peer: entry.peer(),
-                    last_evidence_at: entry.last_seen_at(),
+                    last_evidence_at,
                     at: now,
                 });
             }
-            entry.set_reported_presence(presence);
+            entry.set_expiry_announced(offline);
         }
 
         expired
@@ -277,6 +326,37 @@ impl PeerRoster {
             .ok_or(PeerRosterError::UnknownPeer)?;
 
         Ok(entry.is_connected().then_some(PeerDisconnected { peer }))
+    }
+
+    /// Evicts until one more entry fits under [`MAX_PEERS`](Self::MAX_PEERS).
+    ///
+    /// The order is a domain rule, not an implementation detail (D9): the only
+    /// evictable entry is one that has **no session and no evidence** — a peer
+    /// we were merely told about — and the oldest `recorded_at` goes first,
+    /// because an entry that has sat unproven the longest is the one least
+    /// likely to be worth a dial. Ties break in `PeerId` order, so a full
+    /// roster evicts deterministically (AC13).
+    ///
+    /// An entry with a session or with evidence is **never** evicted, whatever
+    /// the pressure. Those are the peers this roster has actually reached, and
+    /// forgetting one to make room for an unproven identity would let a flood
+    /// of announcements displace the working network — the failure the cap
+    /// exists to prevent. When nothing is evictable the roster is genuinely
+    /// full of real peers and the discovery is refused.
+    fn make_room(&mut self) -> Result<(), PeerRosterError> {
+        while self.peers.len() >= Self::MAX_PEERS {
+            let evictable = self
+                .peers
+                .values()
+                .filter(|entry| entry.session().is_none() && !entry.has_evidence())
+                .min_by_key(|entry| entry.recorded_at())
+                .map(KnownPeer::peer)
+                .ok_or(PeerRosterError::RosterFull)?;
+
+            self.peers.remove(&evictable);
+        }
+
+        Ok(())
     }
 
     fn reject_local(&self, peer: PeerId) -> Result<(), PeerRosterError> {
@@ -304,6 +384,10 @@ pub enum PeerRosterError {
     UnknownPeer,
     /// A discovery carried no endpoint, so there is nothing to dial.
     NoEndpoints,
+    /// The roster holds [`MAX_PEERS`](PeerRoster::MAX_PEERS) peers and every
+    /// one of them has a session or has produced evidence, so there is no
+    /// unproven entry to evict for a newly discovered one.
+    RosterFull,
     /// The peer has no session to establish or close.
     NoSession,
     /// A live session in that direction already exists for the peer.
@@ -342,6 +426,9 @@ impl fmt::Display for PeerRosterError {
             Self::SelfConnection => f.write_str("the local peer is never a roster entry"),
             Self::UnknownPeer => f.write_str("peer is not in the roster"),
             Self::NoEndpoints => f.write_str("a discovered peer must carry at least one endpoint"),
+            Self::RosterFull => {
+                f.write_str("the roster is full of peers that have sessions or evidence")
+            }
             Self::NoSession => f.write_str("peer has no live session in the roster"),
             Self::SessionAlreadyOpen => {
                 f.write_str("a live session in that direction already exists for the peer")

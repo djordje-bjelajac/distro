@@ -23,6 +23,9 @@ mod conversation_view_test;
 mod key_binding;
 #[cfg(test)]
 mod key_binding_test;
+mod network_panes;
+#[cfg(test)]
+mod network_panes_test;
 mod peer_label;
 #[cfg(test)]
 mod peer_label_test;
@@ -40,6 +43,7 @@ mod ui_state_test;
 
 pub use conversation_view::{AuthorRun, ConversationView, Entry, delivery_mark, delivery_text};
 pub use key_binding::{KeyBindings, UiAction};
+pub use network_panes::NetworkPanes;
 pub use peer_label::PeerLabels;
 pub use roster_view::{RosterRow, roster_rows};
 pub use status_line::StatusLine;

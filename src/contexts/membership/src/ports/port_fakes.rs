@@ -56,6 +56,55 @@ impl ClockPort for ManualClock {
     }
 }
 
+/// A clock that counts its readings and moves on every one of them.
+///
+/// Two properties a [`ManualClock`] cannot express:
+///
+/// * **How many times a handler asked.** [`readings`](Self::readings) is the
+///   direct proof that a query took one instant rather than one per peer or one
+///   per half of an answer.
+/// * **Whether it mattered.** Each reading is `step` later than the last, so a
+///   handler that read twice derives two different ages from the same evidence.
+///   With a `step` that crosses a liveness window, the second reading lands on
+///   the other side of a boundary and the resulting view is visibly
+///   inconsistent — the counter says a defect exists, this says what it would
+///   cost.
+///
+/// The first reading is the starting instant, so a correct single-reading caller
+/// sees exactly the same view a `ManualClock` frozen there would produce.
+/// Monotonic, as [`ClockPort`]'s contract requires.
+pub(crate) struct TickingClock {
+    next: Mutex<Millis>,
+    step: DurationMillis,
+    readings: AtomicUsize,
+}
+
+impl TickingClock {
+    pub(crate) const fn from(start: Millis, step: DurationMillis) -> Self {
+        Self {
+            next: Mutex::new(start),
+            step,
+            readings: AtomicUsize::new(0),
+        }
+    }
+
+    /// How often [`ClockPort::now`] has been called.
+    pub(crate) fn readings(&self) -> usize {
+        self.readings.load(Ordering::Relaxed)
+    }
+}
+
+impl ClockPort for TickingClock {
+    fn now(&self) -> Millis {
+        self.readings.fetch_add(1, Ordering::Relaxed);
+
+        let mut next = guard(&self.next);
+        let reading = *next;
+        *next = next.saturating_add(self.step);
+        reading
+    }
+}
+
 /// Samples the network status every time a port it is attached to is called,
 /// so a test can see what a caller *would* have observed while a handler was
 /// still running.
@@ -91,6 +140,13 @@ impl StatusProbe {
 }
 
 /// A discovery mechanism with a scripted view of the network.
+///
+/// [`observe_peers`](PeerDiscoveryPort::observe_peers) is **non-draining**, and
+/// deliberately so: the port's contract is that reading is a question rather
+/// than a withdrawal (canvas `0010` D12, A7), and a fake that emptied itself
+/// would let a handler which joins twice pass here while failing in the field —
+/// exactly the defect that was observed. `observable` is therefore immutable
+/// for the fake's whole life and every call clones it.
 pub(crate) struct ScriptedDiscovery {
     observable: Vec<DiscoveredPeer>,
     observation_failure: Option<PeerDiscoveryError>,

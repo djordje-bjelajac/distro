@@ -133,8 +133,87 @@ fn the_departure_is_announced_after_the_sessions_that_ended() {
 }
 
 #[test]
-fn leaving_saves_every_known_peer_for_the_next_launchs_first_bootstrap_rung() {
+fn leaving_saves_only_the_peers_that_produced_evidence() {
+    // The inversion of `leaving_saves_every_known_peer_...`, which asserted that
+    // carol — known only because something named her — was worth writing to
+    // disk. She is not, and the reason is not tidiness (canvas D8, safeguard
+    // S5): the roster is fed by mDNS and Kademlia, this file is read back by the
+    // *first* rung of the next launch's ladder, and it is dialled ahead of the
+    // LAN. Persisting an identity nobody has ever reached hands whoever
+    // published that record the head of the dial queue, on every future launch,
+    // for as long as the file survives.
     let f = fixture();
+
+    let outcome = f.leave();
+
+    let cached = cache_contents(&f.cache);
+    assert_eq!(outcome.cached_peers, 1);
+    assert_eq!(
+        peers_in(&cached),
+        vec![test_peers::bob()],
+        "bob completed a handshake with us; carol has done nothing but be mentioned"
+    );
+    assert_eq!(outcome.cache_failure, None);
+    assert_eq!(
+        f.state.read(|roster| roster.len()),
+        2,
+        "carol is still a dialable candidate in memory — she is only not written to disk"
+    );
+}
+
+#[test]
+fn a_roster_learned_entirely_from_discovery_writes_an_empty_cache() {
+    // The security property stated on its own, because the mixed roster above
+    // would still pass if the filter kept "the first peer" or "the ones with
+    // sessions". Every entry here arrived the way a DHT record arrives: an
+    // identity and an address, asserted by somebody else. None of it reaches
+    // disk.
+    let mut f = fixture();
+    let state = Arc::new(MembershipState::for_local_peer(test_peers::alice()));
+    state.modify(|roster| {
+        for (index, peer) in [test_peers::bob(), test_peers::carol(), test_peers::dave()]
+            .into_iter()
+            .enumerate()
+        {
+            roster
+                .record_discovery(
+                    peer,
+                    vec![endpoint(BOB_ADDRESS)],
+                    T0.saturating_add(DurationMillis::from_millis(index as u64)),
+                )
+                .expect("a hostile host can cause exactly this, at will");
+        }
+    });
+    f.state = state;
+
+    let outcome = f.leave();
+
+    assert_eq!(outcome.cached_peers, 0);
+    assert_eq!(
+        cache_contents(&f.cache),
+        Vec::new(),
+        "three identities we were told about, none of them dialled first next launch"
+    );
+    assert_eq!(outcome.cache_failure, None);
+    assert_eq!(
+        f.state.read(|roster| roster.len()),
+        3,
+        "leaving forgets nobody; it only declines to persist what was never proven"
+    );
+}
+
+#[test]
+fn a_peer_that_spoke_without_ever_holding_a_session_is_cached() {
+    // The filter is evidence, not sessions. A peer heard from over somebody
+    // else's link has produced something we observed, has an instant worth
+    // storing, and is worth dialling next launch — so restricting the cache to
+    // connected peers would be a different, and wrong, rule.
+    let f = fixture();
+    f.state.modify(|roster| {
+        roster
+            .record_heartbeat(test_peers::carol(), T0)
+            .expect("carol speaks, over a link we do not hold");
+    });
 
     let outcome = f.leave();
 
@@ -142,12 +221,7 @@ fn leaving_saves_every_known_peer_for_the_next_launchs_first_bootstrap_rung() {
     assert_eq!(outcome.cached_peers, 2);
     let mut expected = vec![test_peers::bob(), test_peers::carol()];
     expected.sort_unstable();
-    assert_eq!(
-        peers_in(&cached),
-        expected,
-        "a peer that was never dialled is still an address worth keeping (D1 rung a)"
-    );
-    assert_eq!(outcome.cache_failure, None);
+    assert_eq!(peers_in(&cached), expected);
 }
 
 #[test]

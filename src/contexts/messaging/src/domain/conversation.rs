@@ -3,6 +3,7 @@ use std::fmt;
 
 use shared_types::PeerId;
 
+use crate::domain::author_log::GapClose;
 use crate::domain::events::{
     GapCloseCause, MessageDeliveryStateChanged, MessageDuplicateIgnored, MessageGapClosed,
     MessageReceived, MessageRejected, MessageSent, RejectionReason,
@@ -43,18 +44,35 @@ use crate::domain::{
 /// by [`GAP_TOLERANCE`](Self::GAP_TOLERANCE), swept through
 /// [`close_aged_gaps`](Self::close_aged_gaps), and by
 /// [`AuthorLog::MAX_BUFFERED_MESSAGES`] — and when either bound is reached the
-/// log moves past the gap and says so with a
-/// [`MessageGapClosed`] naming the abandoned range (AC15). Content is never
-/// dropped silently and never shown out of its author's order.
+/// log moves past the gap. Content is never dropped silently and never shown
+/// out of its author's order.
 ///
 /// [`SequenceNumber::FIRST`] is the exception that needs no wait: genesis is
 /// provable from the number itself, so first contact at sequence 1 applies
 /// immediately and first-contact latency (AC1, AC2) is untouched.
 ///
-/// Adopting the *first observed* sequence as a baseline instead would be
-/// cheaper and wrong: a hostile — or merely faster — peer could pin a fresh
-/// joiner's baseline high and every honest message below it would be discarded
-/// in silence.
+/// # Only a run that was in flight *here* is loss (D10)
+///
+/// Ending the wait is not the same as losing anything. A log that had committed
+/// to nothing takes the lowest sequence it is holding as its
+/// [origin](AuthorLog::origin): this peer joined part-way through that author's
+/// run, AC10 gives it no history replay, and the numbers below were never in
+/// flight to it. Nothing is abandoned and no [`MessageGapClosed`] is raised —
+/// reporting one told a user that messages which never existed for this peer
+/// "were never received", and it fired on every restart, because the sender's
+/// counter survives its process (D12) while this peer's mark does not (D7).
+///
+/// A run between two sequences this log *did* observe is the other case: it was
+/// genuinely in flight and did not arrive, so it is abandoned and named
+/// (AC15).
+///
+/// Adopting the first observed sequence as a baseline *on arrival* would still
+/// be wrong, and rule R does not: a hostile — or merely faster — peer could pin
+/// a fresh joiner's baseline high, so the window has to elapse first, and
+/// everything that arrives inside it is kept, in order. What arrives below a
+/// settled origin afterwards is refused by name
+/// ([`RejectionReason::ArrivedAfterGapClosed`]) and never silently, and never
+/// as a duplicate.
 ///
 /// # Ports are absent on purpose
 ///
@@ -265,7 +283,8 @@ impl Conversation {
     /// 4–6. Contiguous — which at first contact means exactly
     ///    [`SequenceNumber::FIRST`], since genesis needs no proof — → applied,
     ///    together with everything it unblocks.
-    /// 7. Otherwise held, until the gap closes or is abandoned.
+    /// 7. Otherwise held, until the gap closes, is abandoned, or — at first
+    ///    contact — becomes this author's origin here (D10).
     ///
     /// Every result is an [`InboundOutcome`] rather than a silent effect. `Err`
     /// is reserved for a caller mistake: a message that does not belong in this
@@ -306,24 +325,29 @@ impl Conversation {
         )
     }
 
-    /// Gives up on every gap that has stayed open for at least `tolerance`,
-    /// reporting each abandoned range in `PeerId` order (rule R, AC13, AC15).
+    /// Ends every wait that has run for at least `tolerance`, reporting each
+    /// abandoned range in `PeerId` order (rule R, AC13, AC15).
     ///
     /// A gap ages from the **local** arrival of the oldest message stuck behind
     /// it: that message is the one that has been unreadable the longest, and a
-    /// later arrival must not extend its wait. Closing the gap moves the log
+    /// later arrival must not extend its wait. Ending the wait moves the log
     /// past the missing run and makes everything held contiguous with it
     /// visible, in the author's send order.
     ///
     /// Pure and time-parameterised: `now` is a `ClockPort` reading the caller
     /// took (D11, S5), so this is decidable in a test without a clock at all.
-    /// Calling it again with nothing new to abandon does nothing and reports
+    /// Calling it again with nothing new to end does nothing and reports
     /// nothing.
     ///
-    /// The messages the close *released* are not in the returned events — they
-    /// are in the conversation, from each event's `to + 1` onwards. An
-    /// application that mirrors applied messages into a read model re-reads
-    /// them from there; the event says which author and from where.
+    /// # An empty result does not mean nothing became visible (D10)
+    ///
+    /// The returned events name only what was **abandoned**. A wait that ended
+    /// by establishing an author's origin here abandoned nothing and reports
+    /// nothing, yet still released everything that author had held — so a
+    /// caller that mirrors released messages must read them from the
+    /// conversation rather than infer them from these events. What became
+    /// visible is the tail each author's [`messages_by`](Self::messages_by)
+    /// gained across this call.
     pub fn close_aged_gaps(
         &mut self,
         now: Millis,
@@ -339,17 +363,18 @@ impl Conversation {
             if now.saturating_elapsed_since(oldest) < tolerance {
                 continue;
             }
-            let Some((from, to)) = log.close_gap() else {
-                continue;
-            };
 
-            closed.push(MessageGapClosed {
-                conversation,
-                author: log.author(),
-                from,
-                to,
-                cause: GapCloseCause::ToleranceElapsed,
-            });
+            // First sight reports nothing: the wait ended by establishing where
+            // this author's stream starts here, not by giving anything up (D10).
+            if let GapClose::Abandoned { from, to } = log.close_gap() {
+                closed.push(MessageGapClosed {
+                    conversation,
+                    author: log.author(),
+                    from,
+                    to,
+                    cause: GapCloseCause::ToleranceElapsed,
+                });
+            }
         }
 
         closed
@@ -437,17 +462,19 @@ impl Conversation {
         // the buffer is full, so rather than refuse this message the oldest gap
         // is given up on and everything held becomes visible (S6, AC15).
         if sequence != expected && log.is_buffer_full() {
-            let (from, to) = log
-                .close_gap()
-                .expect("a full buffer holds at least one message");
-
-            closed_gap = Some(MessageGapClosed {
-                conversation,
-                author: log.author(),
-                from,
-                to,
-                cause: GapCloseCause::BufferFull,
-            });
+            closed_gap = match log.close_gap() {
+                GapClose::Abandoned { from, to } => Some(MessageGapClosed {
+                    conversation,
+                    author: log.author(),
+                    from,
+                    to,
+                    cause: GapCloseCause::BufferFull,
+                }),
+                // First sight: the held run became this author's stream from
+                // its lowest sequence onwards, and nothing was given up (D10).
+                GapClose::OriginEstablished { .. } => None,
+                GapClose::Nothing => unreachable!("a full buffer holds at least one message"),
+            };
 
             // The close moved the mark, so this message is judged again against
             // the state it produced. It cannot fill the buffer a second time:

@@ -71,3 +71,32 @@ pub(crate) fn erin() -> PeerId {
 pub(crate) fn all() -> [PeerId; 5] {
     [alice(), bob(), carol(), dave(), erin()]
 }
+
+/// `count` distinct peers, for the tests that need more identities than the
+/// named fixtures provide — the roster cap needs
+/// [`PeerRoster::MAX_PEERS`](crate::domain::PeerRoster::MAX_PEERS) of them.
+///
+/// Deterministic and RNG-free: candidate encodings are enumerated from a
+/// counter and the ones that decode to a curve point are kept, so the same call
+/// always yields the same peers in the same order. Roughly half of all 32-byte
+/// strings are valid encodings, so this costs about `2 * count` attempts and no
+/// crypto beyond the decoding `PeerId` already performs.
+///
+/// The returned order is *insertion* order, not `PeerId` order — a test that
+/// cares about roster ordering must sort or assert it explicitly.
+pub(crate) fn synthetic(count: usize) -> Vec<PeerId> {
+    let mut peers = Vec::with_capacity(count);
+    let mut candidate: u64 = 0;
+
+    while peers.len() < count {
+        let mut bytes = [0u8; 32];
+        bytes[..8].copy_from_slice(&candidate.to_le_bytes());
+        candidate += 1;
+
+        if let Ok(peer) = PeerId::from_public_key_bytes(bytes) {
+            peers.push(peer);
+        }
+    }
+
+    peers
+}

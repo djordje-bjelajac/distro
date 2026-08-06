@@ -30,6 +30,9 @@ mod network_status_test;
 mod peer_roster;
 #[cfg(test)]
 mod peer_roster_test;
+mod peer_standing;
+#[cfg(test)]
+mod peer_standing_test;
 mod presence;
 #[cfg(test)]
 mod presence_test;
@@ -52,6 +55,7 @@ pub use liveness_windows::{LivenessWindows, LivenessWindowsError};
 pub use millis::Millis;
 pub use network_status::NetworkStatus;
 pub use peer_roster::{PeerRoster, PeerRosterError};
+pub use peer_standing::PeerStanding;
 pub use presence::Presence;
 pub use reachability::Reachability;
 pub use session::{Session, SessionError};

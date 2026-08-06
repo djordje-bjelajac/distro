@@ -357,9 +357,214 @@ fn a_long_run_of_buffered_messages_drains_in_one_go() {
     assert!(outcome.closed_gap().is_none());
 }
 
+// ------------------------------------------ D10: first sight sets the origin
+
+/// A1 — the direct regression. Observed live: a conversation reporting
+/// "5 messages from a11e 5897 were never received" for messages that were never
+/// in flight to this peer.
+#[test]
+fn first_contact_at_a_high_sequence_reports_no_loss_and_the_stream_starts_there() {
+    let mut conversation = broadcast();
+
+    let outcome = accept(
+        &mut conversation,
+        test_peers::bob(),
+        6,
+        "the first thing heard",
+    );
+    assert!(outcome.is_buffered(), "6 still waits the window out");
+
+    let closed = conversation.close_aged_gaps(tolerance_elapsed(), TOLERANCE);
+
+    assert_eq!(
+        closed,
+        Vec::new(),
+        "AC10 gives a late joiner no history, so 1..=5 were never in flight \
+         here and calling them lost is a lie about the network"
+    );
+    assert_eq!(visible(&conversation, test_peers::bob()), [6]);
+    assert_eq!(
+        conversation.high_water_mark(&test_peers::bob()),
+        Some(seq(6))
+    );
+
+    for sequence in 7..=9 {
+        let outcome = accept(
+            &mut conversation,
+            test_peers::bob(),
+            sequence,
+            "the next one",
+        );
+        assert!(outcome.is_applied(), "#{sequence}");
+        assert!(outcome.closed_gap().is_none(), "#{sequence}");
+    }
+    assert_eq!(visible(&conversation, test_peers::bob()), [6, 7, 8, 9]);
+}
+
+/// A2 — the guard that stops A1 becoming "delete the warning". 6 and 9 were
+/// both observed here, so 7 and 8 genuinely were in flight and did not arrive.
+#[test]
+fn a_gap_between_two_observed_sequences_is_still_reported_as_loss() {
+    let mut conversation = broadcast();
+    accept(
+        &mut conversation,
+        test_peers::bob(),
+        6,
+        "the first thing heard",
+    );
+    conversation.close_aged_gaps(tolerance_elapsed(), TOLERANCE);
+    assert_eq!(visible(&conversation, test_peers::bob()), [6]);
+
+    let later = at(20_000);
+    accept_at(&mut conversation, test_peers::bob(), 9, "much later", later);
+    let closed =
+        conversation.close_aged_gaps(at(later.as_millis() + TOLERANCE.as_millis()), TOLERANCE);
+
+    assert_eq!(
+        closed,
+        vec![MessageGapClosed {
+            conversation: ConversationId::Broadcast,
+            author: test_peers::bob(),
+            from: seq(7),
+            to: seq(8),
+            cause: GapCloseCause::ToleranceElapsed,
+        }],
+        "loss between two observed sequences is still named, with its range"
+    );
+    assert_eq!(visible(&conversation, test_peers::bob()), [6, 9]);
+}
+
+/// A1 — reordering at first contact still resolves inside the window, so the
+/// origin lands on the *lowest* sequence heard, not the first one to arrive.
+#[test]
+fn reordering_at_first_contact_applies_both_in_order_with_no_gap_event() {
+    let mut conversation = broadcast();
+
+    let seventh = accept(&mut conversation, test_peers::bob(), 7, "seventh");
+    assert!(seventh.is_buffered());
+
+    let sixth = accept_at(
+        &mut conversation,
+        test_peers::bob(),
+        6,
+        "sixth",
+        at(ARRIVED_AT.as_millis() + 1),
+    );
+    assert!(sixth.is_buffered(), "6 is not provably contiguous either");
+    assert!(sixth.closed_gap().is_none());
+
+    let closed = conversation.close_aged_gaps(tolerance_elapsed(), TOLERANCE);
+
+    assert_eq!(closed, Vec::new());
+    assert_eq!(
+        visible(&conversation, test_peers::bob()),
+        [6, 7],
+        "both, in the author's order"
+    );
+    assert_eq!(conversation.buffered_count(&test_peers::bob()), 0);
+}
+
+/// A1 — why the defect fired on *every* restart: D12 persists the sender's
+/// counter with its keypair while D7 leaves the receiver's mark in memory, so
+/// the first sequence a fresh log hears is wherever that author's counter had
+/// reached.
+#[test]
+fn an_author_resuming_at_a_high_sequence_against_a_fresh_log_reports_no_loss() {
+    let mut conversation = Conversation::rehydrate(
+        ConversationId::Broadcast,
+        test_peers::alice(),
+        Some(seq(41)),
+    )
+    .expect("the broadcast channel is never a conversation with oneself");
+
+    accept(
+        &mut conversation,
+        test_peers::bob(),
+        5_897,
+        "after a restart",
+    );
+    let closed = conversation.close_aged_gaps(tolerance_elapsed(), TOLERANCE);
+
+    assert_eq!(closed, Vec::new(), "a restart is not loss");
+    assert_eq!(visible(&conversation, test_peers::bob()), [5_897]);
+    assert_eq!(
+        conversation.high_water_mark(&test_peers::alice()),
+        Some(seq(41)),
+        "the local author's rehydrated mark is untouched by a remote origin"
+    );
+}
+
+/// A2 — an arrival below an origin established by first sight is still loss,
+/// reported and never mistaken for a duplicate (invariant 6, AC15).
+#[test]
+fn a_message_below_an_origin_established_by_first_sight_is_reported_not_dropped() {
+    let mut conversation = broadcast();
+    accept(
+        &mut conversation,
+        test_peers::bob(),
+        6,
+        "the first thing heard",
+    );
+    conversation.close_aged_gaps(tolerance_elapsed(), TOLERANCE);
+    let before = conversation.clone();
+
+    let outcome = accept(&mut conversation, test_peers::bob(), 5, "below the origin");
+
+    assert_eq!(
+        rejection_of(&outcome),
+        RejectionReason::ArrivedAfterGapClosed
+    );
+    assert!(
+        !outcome.is_duplicate(),
+        "this peer never held 5; calling it a duplicate would hide the loss"
+    );
+    assert!(outcome.closed_gap().is_none());
+    assert_eq!(conversation, before, "the read view is unchanged");
+    assert_eq!(visible(&conversation, test_peers::bob()), [6]);
+}
+
+/// A2 — the buffer-full trigger above an *established* origin still reports the
+/// run it gave up on, with `BufferFull` as the cause.
+#[test]
+fn a_full_buffer_above_an_established_origin_still_reports_what_it_gave_up_on() {
+    let mut conversation = broadcast();
+    let cap = AuthorLog::MAX_BUFFERED_MESSAGES as u64;
+    accept(&mut conversation, test_peers::bob(), 1, "first");
+
+    // 2 never arrives, so 3..=cap+2 fill the buffer exactly.
+    for sequence in 3..=(cap + 2) {
+        assert!(accept(&mut conversation, test_peers::bob(), sequence, "held").is_buffered());
+    }
+
+    let outcome = accept(
+        &mut conversation,
+        test_peers::bob(),
+        cap + 3,
+        "one more than fits",
+    );
+
+    assert_eq!(
+        outcome.closed_gap(),
+        Some(MessageGapClosed {
+            conversation: ConversationId::Broadcast,
+            author: test_peers::bob(),
+            from: seq(2),
+            to: seq(2),
+            cause: GapCloseCause::BufferFull,
+        })
+    );
+    assert!(outcome.is_applied());
+    assert_eq!(
+        visible(&conversation, test_peers::bob()),
+        std::iter::once(1).chain(3..=(cap + 3)).collect::<Vec<_>>()
+    );
+    assert_eq!(conversation.buffered_count(&test_peers::bob()), 0);
+}
+
 // ------------------------------------------------ rule R: abandoning a gap
 
-/// Required case 1 — a late joiner must not starve (AC10).
+/// Required case 1 — a late joiner must not starve (AC10), and must not be told
+/// that the history it was never sent was lost (D10).
 #[test]
 fn a_late_joiner_starts_at_the_first_sequence_it_sees_once_the_window_elapses() {
     let mut conversation = broadcast();
@@ -377,15 +582,15 @@ fn a_late_joiner_starts_at_the_first_sequence_it_sees_once_the_window_elapses() 
 
     assert_eq!(
         closed,
-        vec![MessageGapClosed {
-            conversation: ConversationId::Broadcast,
-            author: test_peers::bob(),
-            from: SequenceNumber::FIRST,
-            to: seq(46),
-            cause: GapCloseCause::ToleranceElapsed,
-        }]
+        Vec::new(),
+        "the window ended by starting this author's stream at 47; 1..=46 were \
+         never in flight to this peer, so none of them is loss"
     );
     assert_eq!(visible(&conversation, test_peers::bob()), [47]);
+    assert_eq!(
+        conversation.high_water_mark(&test_peers::bob()),
+        Some(seq(47))
+    );
 
     let outcome = accept(&mut conversation, test_peers::bob(), 48, "the next one");
 
@@ -433,15 +638,14 @@ fn reordering_inside_the_window_at_first_contact_loses_nothing() {
     );
     assert_eq!(
         closed,
-        vec![MessageGapClosed {
-            conversation: ConversationId::Broadcast,
-            author: test_peers::bob(),
-            from: SequenceNumber::FIRST,
-            to: seq(2),
-            cause: GapCloseCause::ToleranceElapsed,
-        }],
-        "one event, naming only the prefix that never arrived — no gap is \
-         reported inside the run that did"
+        Vec::new(),
+        "no gap is reported inside the run that arrived, and none below it \
+         either: 3 is the lowest sequence this peer ever saw from bob, so the \
+         stream starts there (D10)"
+    );
+    assert_eq!(
+        conversation.high_water_mark(&test_peers::bob()),
+        Some(seq(5))
     );
 }
 
@@ -524,16 +728,11 @@ fn a_full_buffer_closes_the_gap_instead_of_refusing_the_arrival() {
 
     assert_eq!(
         outcome.closed_gap(),
-        Some(MessageGapClosed {
-            conversation: ConversationId::Broadcast,
-            author: test_peers::bob(),
-            from: SequenceNumber::FIRST,
-            to: SequenceNumber::FIRST,
-            cause: GapCloseCause::BufferFull,
-        }),
-        "the abandoned range is named, not inferred"
+        None,
+        "the buffer filling is what ended the wait, but this was first sight \
+         of bob: the stream starts at 2 and nothing below it was lost (D10)"
     );
-    assert!(outcome.is_applied());
+    assert!(outcome.is_applied(), "the arrival is taken, never refused");
     assert_eq!(
         became_visible(&outcome),
         (2..=(cap + 2)).collect::<Vec<_>>(),
@@ -553,7 +752,8 @@ fn a_close_that_makes_room_still_reports_what_it_released_when_the_arrival_waits
     // or the application would never learn to display it.
     let mut conversation = broadcast();
     let cap = AuthorLog::MAX_BUFFERED_MESSAGES as u64;
-    for sequence in 2..=(cap + 1) {
+    accept(&mut conversation, test_peers::bob(), 1, "first");
+    for sequence in 3..=(cap + 2) {
         accept(&mut conversation, test_peers::bob(), sequence, "held");
     }
 
@@ -562,8 +762,30 @@ fn a_close_that_makes_room_still_reports_what_it_released_when_the_arrival_waits
     assert!(outcome.is_buffered());
     assert_eq!(
         outcome.closed_gap().map(|event| (event.from, event.to)),
-        Some((SequenceNumber::FIRST, SequenceNumber::FIRST))
+        Some((seq(2), seq(2))),
+        "2 was in flight between two observed sequences, so it is loss (A2)"
     );
+    assert_eq!(
+        became_visible(&outcome),
+        (3..=(cap + 2)).collect::<Vec<_>>()
+    );
+    assert_eq!(conversation.buffered_count(&test_peers::bob()), 1);
+}
+
+#[test]
+fn a_first_sight_close_that_makes_room_still_reports_what_it_released() {
+    // The same shape at first contact: nothing is abandoned, but the run the
+    // close released is still reported, or it would never be displayed.
+    let mut conversation = broadcast();
+    let cap = AuthorLog::MAX_BUFFERED_MESSAGES as u64;
+    for sequence in 2..=(cap + 1) {
+        accept(&mut conversation, test_peers::bob(), sequence, "held");
+    }
+
+    let outcome = accept(&mut conversation, test_peers::bob(), 1_000, "far ahead");
+
+    assert!(outcome.is_buffered());
+    assert_eq!(outcome.closed_gap(), None);
     assert_eq!(
         became_visible(&outcome),
         (2..=(cap + 1)).collect::<Vec<_>>()
@@ -585,12 +807,19 @@ fn a_close_that_makes_room_can_leave_the_arrival_itself_out_of_reach() {
     let outcome = accept(&mut conversation, test_peers::bob(), 5, "inside the gap");
 
     assert_eq!(
-        outcome.closed_gap().map(|event| (event.from, event.to)),
-        Some((SequenceNumber::FIRST, seq(9)))
+        outcome.closed_gap(),
+        None,
+        "first sight of bob: the stream starts at 10, and 1..=9 were never in \
+         flight here"
     );
     assert_eq!(
         rejection_of(&outcome),
-        RejectionReason::ArrivedAfterGapClosed
+        RejectionReason::ArrivedAfterGapClosed,
+        "below the origin is still refused and still named — never silent"
+    );
+    assert!(
+        !outcome.is_duplicate(),
+        "this peer never held 5; calling it a duplicate would hide it"
     );
     assert_eq!(
         became_visible(&outcome),
@@ -619,6 +848,9 @@ fn a_gap_that_closes_before_the_window_elapses_reports_nothing() {
 #[test]
 fn a_second_sweep_with_nothing_new_changes_nothing() {
     let mut conversation = broadcast();
+    // 1 first, so the sweep below abandons a run that genuinely was in flight
+    // rather than merely establishing where the stream starts.
+    accept(&mut conversation, test_peers::bob(), 1, "first");
     accept(&mut conversation, test_peers::bob(), 9, "mid-stream");
     assert_eq!(
         conversation
@@ -640,6 +872,9 @@ fn aged_gaps_close_in_peer_id_order() {
     let mut conversation = broadcast();
     let arrival_order = [test_peers::carol(), test_peers::bob(), test_peers::dave()];
     for author in arrival_order {
+        // Each author's stream starts at 1 here, so the sweep abandons a run
+        // that genuinely was in flight from each of them.
+        accept(&mut conversation, author, 1, "first");
         accept(&mut conversation, author, 9, "mid-stream");
     }
 
@@ -709,18 +944,13 @@ fn a_direct_conversation_follows_the_same_rule_as_the_broadcast_channel() {
             ConversationId::Direct(_) => direct(),
         };
 
-        // Case 1: a late joiner.
+        // Case 1: a late joiner. First sight starts the stream at 47 and
+        // reports no loss (D10).
         let mut conversation = build();
         accept(&mut conversation, test_peers::bob(), 47, "mid-stream");
         assert_eq!(
             conversation.close_aged_gaps(tolerance_elapsed(), TOLERANCE),
-            vec![MessageGapClosed {
-                conversation: id,
-                author: test_peers::bob(),
-                from: SequenceNumber::FIRST,
-                to: seq(46),
-                cause: GapCloseCause::ToleranceElapsed,
-            }],
+            Vec::new(),
             "{id:?}"
         );
         assert_eq!(visible(&conversation, test_peers::bob()), [47], "{id:?}");
@@ -820,6 +1050,7 @@ fn ageing_follows_the_local_arrival_instant_not_the_authors_claim() {
     // The author's claimed send time is far in the future here; if it drove
     // ageing, the sweep below would never fire.
     let mut conversation = broadcast();
+    accept_at(&mut conversation, test_peers::bob(), 1, "first", at(1));
     accept_at(&mut conversation, test_peers::bob(), 9, "mid-stream", at(1));
 
     let too_early = conversation.close_aged_gaps(at(TOLERANCE.as_millis()), TOLERANCE);
@@ -827,11 +1058,13 @@ fn ageing_follows_the_local_arrival_instant_not_the_authors_claim() {
 
     let closed = conversation.close_aged_gaps(at(1 + TOLERANCE.as_millis()), TOLERANCE);
     assert_eq!(closed.len(), 1);
+    assert_eq!((closed[0].from, closed[0].to), (seq(2), seq(8)));
 }
 
 #[test]
 fn the_oldest_held_message_decides_when_a_gap_is_abandoned() {
     let mut conversation = broadcast();
+    accept_at(&mut conversation, test_peers::bob(), 1, "first", at(100));
     accept_at(
         &mut conversation,
         test_peers::bob(),
@@ -849,8 +1082,9 @@ fn the_oldest_held_message_decides_when_a_gap_is_abandoned() {
 
     let closed = conversation.close_aged_gaps(at(100 + TOLERANCE.as_millis()), TOLERANCE);
 
-    assert_eq!(closed.len(), 1);
-    assert_eq!(visible(&conversation, test_peers::bob()), [5, 6]);
+    assert_eq!(closed.len(), 1, "5 aged, and 6 did not extend its wait");
+    assert_eq!((closed[0].from, closed[0].to), (seq(2), seq(4)));
+    assert_eq!(visible(&conversation, test_peers::bob()), [1, 5, 6]);
 }
 
 // --------------------------------------------------------------- duplicates
@@ -1190,11 +1424,14 @@ fn an_abandoned_gap_is_published_before_the_messages_it_released() {
 
     let mut conversation = broadcast();
     let cap = AuthorLog::MAX_BUFFERED_MESSAGES as u64;
-    for sequence in 2..=(cap + 1) {
+    // 1 first, so 2 is a genuine loss between two observed sequences and there
+    // is an abandonment to order (A2).
+    accept(&mut conversation, test_peers::bob(), 1, "first");
+    for sequence in 3..=(cap + 2) {
         accept(&mut conversation, test_peers::bob(), sequence, "held");
     }
 
-    let events = accept(&mut conversation, test_peers::bob(), cap + 2, "one more").into_events();
+    let events = accept(&mut conversation, test_peers::bob(), cap + 3, "one more").into_events();
 
     assert!(
         matches!(events.first(), Some(MessagingEvent::MessageGapClosed(_))),

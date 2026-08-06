@@ -46,6 +46,35 @@ fn observing_yields_the_peers_the_mechanism_has_seen() {
 }
 
 #[test]
+fn observing_twice_yields_the_same_sightings() {
+    // D12 and A7: a read is a question, not a withdrawal. The bootstrap
+    // ladder's LAN rung pulls from this port on *every* join, so a mechanism
+    // that emptied its own buffer would work exactly once — which is what was
+    // observed, one unmoved instance joining over `local network` and then
+    // reporting `local network: nothing to try` with a live neighbour on the
+    // same link throughout.
+    //
+    // Stated here, at the port, rather than only in the adapter that had the
+    // bug: the contract is what stops the next implementation reintroducing it,
+    // and a fake that drained would let a handler pass here and fail in the
+    // field.
+    let discovery = ScriptedDiscovery::observing(vec![bob()]);
+    let port: &dyn PeerDiscoveryPort = &discovery;
+
+    assert_eq!(port.observe_peers(), Ok(vec![bob()]));
+    assert_eq!(
+        port.observe_peers(),
+        Ok(vec![bob()]),
+        "the second look saw nothing: observing consumed its own answer"
+    );
+    assert_eq!(
+        port.observe_peers(),
+        Ok(vec![bob()]),
+        "the sightings survived a second look but not a third"
+    );
+}
+
+#[test]
 fn observing_an_empty_network_is_success_not_failure() {
     // Isolation is a normal state (canvas §2.2): a LAN with no neighbour and
     // an empty peer cache must not look like a discovery failure.

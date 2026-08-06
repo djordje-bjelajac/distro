@@ -19,6 +19,7 @@
 //! | [`CorrelatingTransport`] | the only place a signature and a `MessageId` coexist (AC11) |
 //! | [`DeliveryIndex`] | the map that correlation writes and the network's acknowledgement reads |
 //! | [`HeartbeatBeacon`] | the liveness probe OP-10 deliberately does not emit |
+//! | [`HeartbeatLedger`] | which signatures were heartbeats, so a report about one is never read as a message's (`0010` S6) |
 //! | [`LocalEndpoints`] | where this peer is reachable — no context has an entry for itself |
 //! | [`GapLedger`] | abandoned runs, which the read model cannot report (AC15) |
 //! | [`Diagnostics`] | the local counters AC6, AC14 and AC15 ask for |
@@ -45,6 +46,9 @@ mod gap_ledger_test;
 mod heartbeat_beacon;
 #[cfg(test)]
 mod heartbeat_beacon_test;
+mod heartbeat_ledger;
+#[cfg(test)]
+mod heartbeat_ledger_test;
 mod local_endpoints;
 #[cfg(test)]
 mod local_endpoints_test;
@@ -69,7 +73,8 @@ pub use correlating_transport::CorrelatingTransport;
 pub use delivery_index::DeliveryIndex;
 pub use diagnostics::Diagnostics;
 pub use gap_ledger::{GapLedger, abandoned_span};
-pub use heartbeat_beacon::{HeartbeatBeacon, HeartbeatError};
+pub use heartbeat_beacon::{HeartbeatBeacon, HeartbeatError, HeartbeatRound};
+pub use heartbeat_ledger::HeartbeatLedger;
 pub use local_endpoints::LocalEndpoints;
 pub use membership_event_relay::MembershipEventRelay;
 pub use messaging_event_sink::MessagingEventSink;

@@ -56,6 +56,8 @@ pub struct ResourceLimits {
     pub max_observers_per_address: usize,
     /// Addresses failed AutoNAT probes are remembered for.
     pub max_failing_addresses: usize,
+    /// Peers discovery reports to a caller that asks what it has seen.
+    pub max_observed_peers: usize,
     /// Undelivered network events buffered for the composition root.
     pub event_queue_capacity: usize,
     /// How long a synchronous port call waits for the driver's reply.
@@ -178,6 +180,24 @@ impl ResourceLimits {
         // servers held per address are capped by the threshold itself, and
         // capping the addresses caps the whole structure.
         max_failing_addresses: 16,
+
+        // The sighting buffer the join ladder's LAN rung pulls from, and
+        // network-sourced input like everything else in this list: mDNS is
+        // answerable by any host on the link, and a Kademlia routing update by
+        // any peer that can place a record in the DHT — both costing an
+        // attacker one identity apiece. Since canvas `0010` D12 the buffer is
+        // no longer emptied by the read that consumes it, so this is what
+        // stands between a stranger's announcements and unbounded growth,
+        // alongside the retention window on
+        // [`SightingLedger`](crate::swarm::sighting_ledger::SightingLedger).
+        //
+        // 256 is far above what either mechanism produces honestly — mDNS
+        // reaches one broadcast domain, and a routing update names a handful of
+        // peers — while keeping the candidate list the ladder walks *one dial
+        // at a time* to a length that finishes. Deliberately well below the
+        // roster's own 1024: the roster remembers everyone this peer has ever
+        // met, and this only holds who was seen in the last few minutes.
+        max_observed_peers: 256,
 
         // The composition root drains events on its own loop. A queue of 1024
         // absorbs a burst without letting a stalled root grow this process's

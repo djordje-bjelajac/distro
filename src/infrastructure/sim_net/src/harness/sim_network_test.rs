@@ -683,13 +683,32 @@ fn a_partition_stops_traffic_and_healing_restores_it() {
     let (alice, bob) = (net.peer_id("alice"), net.peer_id("bob"));
     net.boot_all();
 
+    // One message before the split, so bob's stream has a floor. Without it,
+    // bob's first sight of alice would be the message *after* the heal, which
+    // since D10 establishes the origin rather than reporting a loss — the split
+    // would then be indistinguishable from a late join, and this scenario would
+    // be asserting nothing about partitions at all (canvas `0010` D10, A1).
+    net.named("alice")
+        .publish_broadcast("before the split")
+        .expect("gossip accepts it");
+    net.settle();
+    assert_eq!(
+        net.peer(bob).transcript(ConversationId::Broadcast),
+        ["before the split"],
+        "the scenario needs bob to have heard alice before the split"
+    );
+
     net.partition_off(&[bob]);
     net.named("alice")
         .publish_broadcast("into the void")
         .expect("gossip accepts it");
     net.settle();
 
-    assert!(net.peer(bob).broadcast_history().is_empty());
+    assert_eq!(
+        net.peer(bob).transcript(ConversationId::Broadcast),
+        ["before the split"],
+        "the split carried traffic"
+    );
 
     net.heal_partitions();
     net.named("alice")
@@ -697,24 +716,45 @@ fn a_partition_stops_traffic_and_healing_restores_it() {
         .expect("gossip accepts it");
     net.settle();
 
-    // The message that survived carries sequence 2, and bob never saw 1 — so it
-    // waits behind the gap until the tolerance window elapses and a sweep
-    // abandons the range (rule R, AC10's affirmative half, AC15). No history is
-    // replayed: what was lost to the split stays lost, and is reported.
-    assert!(net.peer(bob).broadcast_history().is_empty());
+    // The message that survived carries sequence 3, and bob saw 1 but never 2 —
+    // a run between two sequences it did observe, which is loss rather than a
+    // stream that started late. It waits behind the gap until the tolerance
+    // window elapses and a sweep abandons the range (rule R, AC15, A2). No
+    // history is replayed: what was lost to the split stays lost, and is
+    // reported by name.
+    assert_eq!(
+        net.peer(bob).transcript(ConversationId::Broadcast),
+        ["before the split"],
+        "a message behind an open gap was displayed through"
+    );
     net.run_for(3_000);
 
     assert_eq!(
         net.peer(bob).transcript(ConversationId::Broadcast),
-        ["after the heal"],
+        ["before the split", "after the heal"],
         "the message lost to the split is not resurrected"
     );
-    assert!(
-        net.trace()
-            .messaging_events_of(bob)
-            .iter()
-            .any(|event| matches!(event, MessagingEvent::MessageGapClosed(_))),
-        "the abandoned range was not reported"
+
+    let abandoned: Vec<_> = net
+        .trace()
+        .messaging_events_of(bob)
+        .into_iter()
+        .filter_map(|event| match event {
+            MessagingEvent::MessageGapClosed(closed) => Some(closed),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        abandoned.len(),
+        1,
+        "the abandoned range was not reported: {abandoned:?}"
+    );
+    assert_eq!(abandoned[0].author, alice);
+    assert_eq!(abandoned[0].conversation, ConversationId::Broadcast);
+    assert_eq!(
+        (abandoned[0].from.as_u64(), abandoned[0].to.as_u64()),
+        (2, 2),
+        "the report named a range other than the message the split ate"
     );
     assert_ne!(alice, bob);
 }

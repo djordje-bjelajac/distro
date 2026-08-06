@@ -32,6 +32,13 @@ pub struct OpenSession {
 /// the address the link came from. Without that, the ticket rung of D1 would
 /// work in one direction only.
 ///
+/// A full roster refuses that entry as a state rather than an error
+/// ([`DiscoveryOutcome::RosterFull`](crate::ports::DiscoveryOutcome::RosterFull)),
+/// so the session transition below is what reports the consequence: with no
+/// entry to attach to, it answers `UnknownPeer`. That is accurate — the peer is
+/// not in the roster — and it is the refusal every caller already handles as
+/// "this one did not work", the bootstrap ladder included.
+///
 /// # A dial is a handshake
 ///
 /// `PeerTransportPort::dial` reports `HandshakeFailed` separately from

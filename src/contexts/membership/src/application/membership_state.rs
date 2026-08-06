@@ -85,6 +85,16 @@ impl MembershipState {
         self.joining.store(false, Ordering::Release);
     }
 
+    /// Whether a bootstrap ladder is in flight.
+    ///
+    /// Deliberately **does not touch the roster lock**: it is the one fact about
+    /// this context that the roster cannot hold, so a caller assembling a
+    /// single-snapshot view can ask for it without spending a second
+    /// acquisition on it.
+    pub(crate) fn is_joining(&self) -> bool {
+        self.joining.load(Ordering::Acquire)
+    }
+
     /// How connected this instance currently is.
     ///
     /// `Joining` outranks the session count: a re-join over live sessions is
@@ -92,7 +102,7 @@ impl MembershipState {
     /// on. Once the phase ends the count decides — `Connected(n)` or, for zero,
     /// `Isolated`, which is a normal state and not a failure.
     pub fn network_status(&self) -> NetworkStatus {
-        if self.joining.load(Ordering::Acquire) {
+        if self.is_joining() {
             return NetworkStatus::Joining;
         }
 

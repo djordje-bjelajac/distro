@@ -15,6 +15,9 @@
 mod get_network_status;
 #[cfg(test)]
 mod get_network_status_test;
+mod get_network_view;
+#[cfg(test)]
+mod get_network_view_test;
 mod list_known_peers;
 #[cfg(test)]
 mod list_known_peers_test;
@@ -24,6 +27,7 @@ mod list_online_peers_test;
 mod membership_query_service;
 
 pub use get_network_status::{GetNetworkStatus, GetNetworkStatusHandler};
+pub use get_network_view::{GetNetworkView, GetNetworkViewHandler};
 pub use list_known_peers::{ListKnownPeers, ListKnownPeersHandler};
 pub use list_online_peers::{ListOnlinePeers, ListOnlinePeersHandler};
 pub use membership_query_service::MembershipQueryService;

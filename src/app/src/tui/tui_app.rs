@@ -15,8 +15,8 @@ use crate::composition::Node;
 use crate::runtime::{EngineCommand, EngineHandle};
 use crate::tui::screen::{self, ScreenData};
 use crate::tui::{
-    ConversationEntry, ConversationView, KeyBindings, Mode, Overlay, PeerLabels, StatusLine,
-    UiAction, UiState, roster_rows,
+    ConversationEntry, ConversationView, KeyBindings, Mode, NetworkPanes, Overlay, PeerLabels,
+    StatusLine, UiAction, UiState,
 };
 
 /// Runs the terminal interface until the user quits.
@@ -91,7 +91,11 @@ struct Frame {
     status: StatusLine,
     conversations: Vec<ConversationEntry>,
     conversation: ConversationView,
-    roster: Vec<crate::tui::RosterRow>,
+    /// The status line's count and the roster's rows, from one reading of the
+    /// roster. They used to be two reads at two instants, and the screen
+    /// contradicted itself: `connected (2 peers)` above rows that all read
+    /// `offline` (canvas D5, OP-7).
+    network: NetworkPanes,
     notices: Vec<crate::composition::Notice>,
     local_fingerprint: String,
     selected_fingerprint: Option<String>,
@@ -101,9 +105,10 @@ struct Frame {
 
 impl Frame {
     fn gather(node: &Arc<Node>, labels: PeerLabels, state: &UiState) -> Self {
-        let peers = node.membership().queries().known_peers();
-        let peer_ids: Vec<PeerId> = peers.iter().map(|view| view.peer).collect();
-        let conversations = ConversationEntry::list(&peer_ids, labels);
+        let network = NetworkPanes::gather(node.membership().queries(), labels, |peer| {
+            node.trust().trust_of(peer)
+        });
+        let conversations = ConversationEntry::list(&network.peer_ids(), labels);
 
         let selected = conversations
             .get(state.selected())
@@ -120,14 +125,14 @@ impl Frame {
 
         Self {
             status: StatusLine::build(
-                node.membership().queries().network_status(),
+                network.status(),
                 &node.diagnostics().reachability(),
                 node.local_peer(),
                 &display_name,
                 selected.map_or("broadcast", |entry| entry.label.as_str()),
             ),
             conversation: ConversationView::build(&history, &gaps, labels),
-            roster: roster_rows(&peers, labels, |peer| node.trust().trust_of(peer)),
+            network,
             notices: node.notices().latest(NOTICE_LINES),
             local_fingerprint: PeerLabels::full_fingerprint(node.local_peer()),
             selected_fingerprint: conversation_id
@@ -144,7 +149,7 @@ impl Frame {
             status: &self.status,
             conversations: &self.conversations,
             conversation: &self.conversation,
-            roster: &self.roster,
+            roster: self.network.roster(),
             notices: &self.notices,
             local_fingerprint: &self.local_fingerprint,
             selected_fingerprint: self.selected_fingerprint.as_deref(),
@@ -178,6 +183,15 @@ fn diagnostics_of(node: &Arc<Node>) -> Vec<(String, u64)> {
         ),
         ("heartbeats sent".to_owned(), local.heartbeats_sent()),
         ("heartbeats failed".to_owned(), local.heartbeats_failed()),
+        // Two rows because they are two faults: the one above is this peer
+        // failing to speak, this one is a peer failing to answer. A heartbeat
+        // is a direct message and so is acknowledged, and this is the only
+        // place an unanswered one is reported — it deliberately raises no
+        // notice and makes no claim about presence (canvas `0010` S6).
+        (
+            "heartbeats unacknowledged".to_owned(),
+            local.heartbeats_unacknowledged(),
+        ),
         (
             "direct deliveries failed".to_owned(),
             local.direct_delivery_failures(),

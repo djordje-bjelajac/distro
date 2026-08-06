@@ -244,7 +244,7 @@ fn the_clock_is_not_consulted_because_a_close_is_not_evidence_of_life() {
     assert_eq!(
         f.state
             .read(|roster| roster.peer(&test_peers::bob()).map(|e| e.last_seen_at())),
-        Some(T0),
+        Some(Some(T0)),
         "a locally initiated close says nothing about the remote at all"
     );
 }

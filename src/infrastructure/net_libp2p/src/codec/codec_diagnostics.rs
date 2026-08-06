@@ -37,6 +37,8 @@ struct Counters {
     probes_run: AtomicU64,
     probes_succeeded: AtomicU64,
     probes_failed: AtomicU64,
+    broadcasts_propagated: AtomicU64,
+    broadcasts_reaching_nobody: AtomicU64,
 }
 
 impl CodecDiagnostics {
@@ -158,6 +160,36 @@ impl CodecDiagnostics {
         self.counters.probes_failed.load(Ordering::Relaxed)
     }
 
+    /// Broadcasts this peer handed to at least one subscribed peer.
+    ///
+    /// # Why a broadcast that reached nobody is counted rather than reported
+    ///
+    /// A broadcast has no recipient and no acknowledgement, so there is nothing
+    /// for it to *fail* against: publishing while alone on the network is the
+    /// ordinary state of a first launch, and turning it into an error would
+    /// make `Isolated` — a normal status — read as a fault. But leaving it
+    /// indistinguishable from a delivery is the silent loss AC11 refuses for
+    /// direct messages: `→ published` looked identical whether the message
+    /// reached five peers or vanished (canvas `0010` D11).
+    ///
+    /// These two numbers are where the difference survives. Read together they
+    /// say whether this peer is talking to a network or to itself, which is
+    /// exactly the question the observed run could not answer: one instance's
+    /// broadcasts all read `→ published` and appeared in no other pane.
+    pub fn broadcasts_propagated(&self) -> u64 {
+        self.counters.broadcasts_propagated.load(Ordering::Relaxed)
+    }
+
+    /// Broadcasts accepted with no peer subscribed to the topic to take them.
+    ///
+    /// Not an error, and never counted as one — see
+    /// [`broadcasts_propagated`](Self::broadcasts_propagated).
+    pub fn broadcasts_reaching_nobody(&self) -> u64 {
+        self.counters
+            .broadcasts_reaching_nobody
+            .load(Ordering::Relaxed)
+    }
+
     pub(crate) fn count_tolerated_minor(&self) {
         self.counters
             .tolerated_minor
@@ -230,5 +262,17 @@ impl CodecDiagnostics {
 
     pub(crate) fn count_probe_failed(&self) {
         self.counters.probes_failed.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn count_broadcast_propagated(&self) {
+        self.counters
+            .broadcasts_propagated
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn count_broadcast_reached_nobody(&self) {
+        self.counters
+            .broadcasts_reaching_nobody
+            .fetch_add(1, Ordering::Relaxed);
     }
 }

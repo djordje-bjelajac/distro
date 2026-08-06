@@ -21,7 +21,13 @@ struct Fixture {
     handler: ExpirePresenceHandler,
 }
 
-/// A fixture knowing `bob` and `carol`, both last seen at `T0`.
+/// A fixture knowing `bob` and `carol`, **both of whom spoke at `T0`**.
+///
+/// The heartbeat is the point. This fixture used to reach the same state by
+/// passing `T0` to `record_discovery`, which fabricated the evidence these
+/// tests then measured the age of — so the whole file was ageing an instant no
+/// peer had produced. Expiry is a statement about a peer that went quiet, and
+/// there is no such thing for a peer that never spoke (invariant 5).
 fn fixture() -> Fixture {
     let state = Arc::new(MembershipState::for_local_peer(test_peers::alice()));
     let clock = Arc::new(ManualClock::starting_at(T0));
@@ -31,6 +37,7 @@ fn fixture() -> Fixture {
             roster
                 .record_discovery(peer, vec![endpoint("/ip4/198.51.100.7/udp/4001")], T0)
                 .expect("discovery");
+            roster.record_heartbeat(peer, T0).expect("the peer speaks");
         }
     });
 
@@ -54,9 +61,15 @@ fn expired(f: &Fixture) -> Vec<PeerPresenceExpired> {
 }
 
 #[test]
-fn a_peer_that_has_not_been_heard_from_expires_within_the_liveness_window() {
+fn a_peer_that_stops_speaking_expires_within_the_liveness_window() {
     // AC5: stopping any instance leaves the others functional, and they
     // observe the departure within the liveness window.
+    //
+    // Renamed from `a_peer_that_has_not_been_heard_from_expires_...`, which now
+    // names the opposite case: a peer that has *never* been heard from does not
+    // expire at all, which is
+    // `a_peer_that_was_never_heard_from_never_expires_however_long_it_sits`
+    // below. Silence is only measurable after speech.
     let f = fixture();
 
     f.clock.advance(DurationMillis::from_secs(61));
@@ -83,6 +96,52 @@ fn a_peer_that_has_not_been_heard_from_expires_within_the_liveness_window() {
         f.publisher.published().len(),
         2,
         "the expiry reaches whoever is listening, not just the caller"
+    );
+}
+
+#[test]
+fn a_peer_that_was_never_heard_from_never_expires_however_long_it_sits() {
+    // Invariant 5, and the reason the test above had to be renamed rather than
+    // repaired. `PeerPresenceExpired` carries `last_evidence_at`, and for a peer
+    // that produced none there is no honest value to put there — so the event
+    // cannot be published, and publishing it anyway would tell `messaging` and
+    // the UI that a peer went away when nothing ever arrived from it.
+    //
+    // This is also what makes an unbounded roster survivable: `Unknown` entries
+    // never expire, which is why `PeerRoster::MAX_PEERS` exists (canvas D9).
+    let state = Arc::new(MembershipState::for_local_peer(test_peers::alice()));
+    let clock = Arc::new(ManualClock::starting_at(T0));
+    let publisher = Arc::new(RecordingPublisher::new());
+    state.modify(|roster| {
+        roster
+            .record_discovery(
+                test_peers::bob(),
+                vec![endpoint("/ip4/198.51.100.7/udp/4001")],
+                T0,
+            )
+            .expect("someone told alice that bob exists, and that is all");
+    });
+    let handler = ExpirePresenceHandler::new(
+        Arc::clone(&state),
+        Arc::clone(&clock) as Arc<dyn ClockPort + Send + Sync>,
+        Arc::clone(&publisher) as Arc<dyn EventPublisherPort + Send + Sync>,
+        LivenessWindows::DEFAULT,
+    );
+
+    for _ in 0..20 {
+        clock.advance(DurationMillis::from_secs(60));
+        assert_eq!(
+            handler.handle(ExpirePresence).expect("sweep"),
+            Vec::new(),
+            "no age makes a peer that never spoke into a peer that went away"
+        );
+    }
+
+    assert_eq!(publisher.published(), Vec::new());
+    assert_eq!(
+        state.read(|roster| roster.peer(&test_peers::bob()).map(|e| e.last_seen_at())),
+        Some(None),
+        "and twenty sweeps invented no instant to expire against"
     );
 }
 
@@ -204,6 +263,9 @@ fn shorter_windows_expire_a_peer_sooner_without_any_other_change() {
                 T0,
             )
             .expect("discovery");
+        roster
+            .record_heartbeat(test_peers::bob(), T0)
+            .expect("bob speaks");
     });
     let windows = LivenessWindows::new(
         DurationMillis::from_millis(100),
@@ -239,6 +301,9 @@ fn a_publisher_failure_is_reported_rather_than_swallowed() {
                 T0,
             )
             .expect("discovery");
+        roster
+            .record_heartbeat(test_peers::bob(), T0)
+            .expect("bob speaks, so there is a silence to announce later");
     });
     let handler = ExpirePresenceHandler::new(
         state,

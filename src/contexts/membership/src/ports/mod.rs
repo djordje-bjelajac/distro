@@ -45,9 +45,14 @@ mod join_diagnostic_test;
 mod join_network_port;
 mod join_outcome;
 mod known_peer_view;
+#[cfg(test)]
+mod known_peer_view_test;
 mod leave_outcome;
 mod membership_command_error;
 mod membership_query_port;
+mod network_view;
+#[cfg(test)]
+mod network_view_test;
 mod peer_cache_port;
 #[cfg(test)]
 mod peer_cache_port_test;
@@ -76,6 +81,7 @@ pub use known_peer_view::KnownPeerView;
 pub use leave_outcome::LeaveOutcome;
 pub use membership_command_error::MembershipCommandError;
 pub use membership_query_port::MembershipQueryPort;
+pub use network_view::NetworkView;
 pub use peer_cache_port::{PeerCacheError, PeerCachePort};
 pub use peer_discovery_port::{PeerDiscoveryError, PeerDiscoveryPort};
 pub use peer_transport_port::{PeerTransportError, PeerTransportPort};

@@ -34,6 +34,17 @@ use crate::domain::{Message, Millis, SequenceNumber};
 /// "not yet received" from "never will be": a message below the origin, or
 /// inside a gap the log has closed behind, is
 /// [out of reach](Self::is_out_of_reach) — not a duplicate.
+///
+/// # The stream starts where this peer first heard it (D10)
+///
+/// A log with no origin has heard nothing from this author, so it has no reason
+/// to believe the author ever sent it anything: AC10 gives a late joiner no
+/// history replay, and this peer's own mark does not survive its process (D7)
+/// while the sender's counter does (D12). The first sequence that becomes
+/// applicable therefore *establishes* the origin, and the run below it is not a
+/// gap — it never existed here. Only a run between two sequences this log
+/// actually observed is loss, and only that is reported as
+/// [`MessageGapClosed`](crate::domain::events::MessageGapClosed).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuthorLog {
     author: PeerId,
@@ -41,6 +52,29 @@ pub struct AuthorLog {
     origin: Option<SequenceNumber>,
     high_water: Option<SequenceNumber>,
     buffered: BTreeMap<SequenceNumber, BufferedMessage>,
+}
+
+/// What [`AuthorLog::close_gap`] came to.
+///
+/// The distinction this type exists to force is D10's: an absence below the
+/// first sequence this peer ever saw from an author is **not** loss — those
+/// messages were never in flight here — while an absence between two sequences
+/// it did see is. Returning a bare range conflated the two, and the interface
+/// then told a user that messages which never existed for it "were never
+/// received".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum GapClose {
+    /// Nothing was held, so there was no wait to end and nothing moved.
+    Nothing,
+    /// First sight of this author: the lowest held sequence became the origin
+    /// and the stream starts there (AC10, D10). Nothing was abandoned.
+    OriginEstablished { origin: SequenceNumber },
+    /// A run between two sequences this log observed was given up on,
+    /// inclusive of both ends. This is loss, and it is reported (AC15).
+    Abandoned {
+        from: SequenceNumber,
+        to: SequenceNumber,
+    },
 }
 
 /// A message held until its gap closes, with the **local** instant it arrived.
@@ -114,9 +148,12 @@ impl AuthorLog {
     /// The lowest sequence number this log has committed to; `None` before it
     /// has committed to anything.
     ///
-    /// Genesis commits it to [`SequenceNumber::FIRST`]. Abandoning a gap
-    /// commits it to the last sequence given up on, because from that moment
-    /// nothing at or below is ever admissible again.
+    /// The first sequence this log applies commits it: genesis commits it to
+    /// [`SequenceNumber::FIRST`], and first contact part-way through an
+    /// author's run commits it to whatever that first applicable sequence was
+    /// (D10). Abandoning a gap afterwards moves it to the last sequence given
+    /// up on, because from that moment nothing at or below is ever admissible
+    /// again.
     pub const fn origin(&self) -> Option<SequenceNumber> {
         self.origin
     }
@@ -232,27 +269,52 @@ impl AuthorLog {
         true
     }
 
-    /// Gives up on the gap below the lowest held message, returning the
-    /// abandoned range as `(from, to)`, inclusive, and applying everything the
-    /// close made contiguous.
+    /// Stops waiting on the gap below the lowest held message, applying
+    /// everything that makes contiguous, and says what that came to.
     ///
-    /// `None` when nothing is held — there is no gap to abandon then, and
-    /// nothing at all happens.
-    pub(super) fn close_gap(&mut self) -> Option<(SequenceNumber, SequenceNumber)> {
-        let lowest = self.lowest_buffered()?;
+    /// Two very different things end the same wait, which is why the answer is
+    /// [`GapClose`] rather than a range:
+    ///
+    /// * This log had committed to nothing, so the lowest held message
+    ///   *establishes* the origin. Nothing below it was ever in flight to this
+    ///   peer (AC10, D10) — there is no gap, and nothing is lost.
+    /// * This log had a mark, so the run between it and the lowest held message
+    ///   was genuinely in flight and did not arrive. That is loss, and the
+    ///   range is named.
+    pub(super) fn close_gap(&mut self) -> GapClose {
+        let Some(lowest) = self.lowest_buffered() else {
+            return GapClose::Nothing;
+        };
+
+        // First sight of this author: no origin committed and nothing applied.
+        // The two are set together everywhere, so this is exactly "this log has
+        // never held anything from this author".
+        if self.origin.is_none() && self.high_water.is_none() {
+            let held = self
+                .buffered
+                .remove(&lowest)
+                .expect("the lowest held sequence is held");
+            // `apply` is what commits the origin, so the stream starts here.
+            self.apply(held.message);
+            self.drain_contiguous();
+
+            return GapClose::OriginEstablished { origin: lowest };
+        }
+
         // Both hold in every reachable state: a buffered message always sits
         // above the mark, so the mark has a successor and the message has a
         // predecessor.
-        let from = SequenceNumber::following(self.high_water).ok()?;
-        let to = lowest.predecessor()?;
+        let (Ok(from), Some(to)) = (
+            SequenceNumber::following(self.high_water),
+            lowest.predecessor(),
+        ) else {
+            return GapClose::Nothing;
+        };
 
-        if self.origin.is_none() {
-            self.origin = Some(to);
-        }
         self.high_water = Some(to);
         self.drain_contiguous();
 
-        Some((from, to))
+        GapClose::Abandoned { from, to }
     }
 
     /// Applies every buffered message that has just become contiguous, in
