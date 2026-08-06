@@ -93,4 +93,17 @@ impl MessageLogPort for InMemoryMessageLog {
     fn conversations(&self) -> Result<Vec<ConversationId>, MessageLogError> {
         Ok(guard(&self.conversations).keys().copied().collect())
     }
+
+    /// Drops everything and says how much there was.
+    ///
+    /// Identical to `infra-store-fs`'s log of the same name, as every method
+    /// here is: the simulator is where multi-peer claims are verified (S5), and
+    /// a store that cleared differently in the harness than in the app would
+    /// make those verifications say nothing about the app.
+    fn clear(&self) -> Result<usize, MessageLogError> {
+        let mut conversations = guard(&self.conversations);
+        let dropped = conversations.values().map(Vec::len).sum();
+        conversations.clear();
+        Ok(dropped)
+    }
 }

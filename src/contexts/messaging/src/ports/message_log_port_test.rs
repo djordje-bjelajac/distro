@@ -78,6 +78,50 @@ fn an_unavailable_log_reports_a_typed_error_on_every_operation() {
         Err(MessageLogError::Unavailable)
     );
     assert_eq!(log.conversations(), Err(MessageLogError::Unavailable));
+    assert_eq!(log.clear(), Err(MessageLogError::Unavailable));
+}
+
+#[test]
+fn clearing_drops_every_conversation_and_reports_the_message_count() {
+    let log = InMemoryMessageLog::default();
+    log.append(&message(ConversationId::Broadcast, 1, "first"))
+        .expect("room");
+    log.append(&message(ConversationId::Broadcast, 2, "second"))
+        .expect("room");
+    log.append(&message(
+        ConversationId::Direct(test_peers::bob()),
+        1,
+        "hello",
+    ))
+    .expect("room");
+
+    assert_eq!(log.clear(), Ok(3));
+    assert_eq!(log.conversations(), Ok(Vec::new()));
+    assert_eq!(log.load(ConversationId::Broadcast), Ok(Vec::new()));
+}
+
+/// Having nothing to forget is not a failure to forget.
+#[test]
+fn clearing_an_empty_log_reports_nothing_dropped_rather_than_failing() {
+    let log = InMemoryMessageLog::default();
+
+    assert_eq!(log.clear(), Ok(0));
+}
+
+/// A cleared log is a usable log, not a spent one — the process keeps running
+/// and the next message has to land somewhere.
+#[test]
+fn a_cleared_log_still_accepts_messages() {
+    let log = InMemoryMessageLog::default();
+    log.append(&message(ConversationId::Broadcast, 1, "before"))
+        .expect("room");
+    log.clear().expect("clearing an in-memory log cannot fail");
+
+    log.append(&message(ConversationId::Broadcast, 2, "after"))
+        .expect("room");
+
+    assert_eq!(log.conversations(), Ok(vec![ConversationId::Broadcast]));
+    assert_eq!(log.load(ConversationId::Broadcast).expect("loads").len(), 1);
 }
 
 #[test]

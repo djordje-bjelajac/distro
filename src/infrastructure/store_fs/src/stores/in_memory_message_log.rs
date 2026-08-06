@@ -108,4 +108,20 @@ impl MessageLogPort for InMemoryMessageLog {
     fn conversations(&self) -> Result<Vec<ConversationId>, MessageLogError> {
         Ok(self.guard().keys().copied().collect())
     }
+
+    /// Drops everything and says how much there was.
+    ///
+    /// Infallible here — a `BTreeMap` cannot refuse to empty — but the port
+    /// returns a `Result` because a durable adapter behind the same trait
+    /// later on genuinely can, and a signature that assumed otherwise would
+    /// have to change when it arrives.
+    ///
+    /// The capacity is untouched: clearing frees the log, it does not resize
+    /// it.
+    fn clear(&self) -> Result<usize, MessageLogError> {
+        let mut conversations = self.guard();
+        let dropped = Self::total(&conversations);
+        conversations.clear();
+        Ok(dropped)
+    }
 }

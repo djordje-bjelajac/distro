@@ -7,7 +7,7 @@
 //!
 //! The commands live here rather than in `ports/` because a port may depend on
 //! `domain` and `shared_types` only. The inbound ports therefore speak in
-//! domain types, and the three services below build these DTOs from them.
+//! domain types, and the four services below build these DTOs from them.
 //!
 //! # The two send paths never merge
 //!
@@ -21,6 +21,10 @@
 mod accept_inbound_message;
 #[cfg(test)]
 mod accept_inbound_message_test;
+mod clear_history;
+mod clear_history_service;
+#[cfg(test)]
+mod clear_history_test;
 mod close_aged_gaps;
 #[cfg(test)]
 mod close_aged_gaps_test;
@@ -46,6 +50,8 @@ mod send_direct_message_test;
 mod send_message_service;
 
 pub use accept_inbound_message::{AcceptInboundMessage, AcceptInboundMessageHandler};
+pub use clear_history::{ClearHistory, ClearHistoryHandler};
+pub use clear_history_service::ClearHistoryService;
 pub use close_aged_gaps::{CloseAgedGaps, CloseAgedGapsHandler};
 pub use fail_pending_directs::{FailPendingDirects, FailPendingDirectsHandler};
 pub use inbound_envelope_service::InboundEnvelopeService;

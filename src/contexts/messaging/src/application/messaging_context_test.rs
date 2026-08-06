@@ -288,7 +288,7 @@ fn the_context_splits_into_parts_that_still_share_its_registry() {
         .send_direct(test_peers::bob(), "before the split")
         .expect("sent");
 
-    let (_send, _inbound, lifecycle, queries) = alice.context.context.into_parts();
+    let (_send, _inbound, lifecycle, _history, queries) = alice.context.context.into_parts();
     lifecycle
         .peer_disconnected(PeerDisconnected {
             peer: test_peers::bob(),

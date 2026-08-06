@@ -140,6 +140,38 @@ impl ConversationRegistry {
         self.lock().values_mut().map(&mut visit).collect()
     }
 
+    /// Drops every conversation, and reports how many there were.
+    ///
+    /// # Why dropping is the right primitive, and not a blunt one
+    ///
+    /// This looks like it throws away more than a clear should — the local
+    /// author's high-water mark goes with everything else. It does not, and
+    /// the reason is [`modify`](Self::modify): the next touch of a
+    /// conversation finds it absent, asks
+    /// [`SequenceCounterPort`](crate::ports::SequenceCounterPort) what this
+    /// identity has issued, and rehydrates at that mark. The counter outlives
+    /// the process (D12), so it certainly outlives a clear.
+    ///
+    /// That is what makes the D12 defect unreachable from here **by
+    /// construction rather than by care**: there is no line to write that
+    /// preserves the mark, so there is no line to forget to write. The
+    /// corresponding obligation is a prohibition — *nothing on the clear path
+    /// may call the counter*. Resetting it would have every message this peer
+    /// sent afterwards classified a duplicate by peers still holding the old
+    /// mark: going permanently mute while appearing, to itself, to work.
+    ///
+    /// # The log has to follow
+    ///
+    /// [`MessageLogPort`](crate::ports::MessageLogPort) mirrors what has been
+    /// applied and is what the interface *lists*. Clearing here without
+    /// clearing there leaves rows on screen whose contents load as empty.
+    pub(crate) fn clear(&self) -> usize {
+        let mut open = self.lock();
+        let dropped = open.len();
+        open.clear();
+        dropped
+    }
+
     /// Every conversation currently open, in [`ConversationId`] order.
     ///
     /// Test-only. Production reads the conversation *listing* from

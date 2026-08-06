@@ -30,6 +30,35 @@ pub trait MessageLogPort {
     /// Every conversation the log holds anything for, in a deterministic
     /// order (AC13) — the input to the `ListConversations` query (OP-7).
     fn conversations(&self) -> Result<Vec<ConversationId>, MessageLogError>;
+
+    /// Discards everything and reports how many messages went.
+    ///
+    /// The user-driven half of a clear (canvas `0013`). It is not a prune and
+    /// not an eviction: there is no age, no cap, and no selection — either the
+    /// log holds a conversation or it holds nothing.
+    ///
+    /// # It never travels alone
+    ///
+    /// This log is a *mirror* of what the application has applied, and
+    /// [`conversations`](Self::conversations) is what the interface lists. A
+    /// log cleared while the conversations it mirrors are still open leaves the
+    /// listing and the history disagreeing — rows on screen whose contents
+    /// load as empty. Whoever calls this must clear the conversations in the
+    /// same operation.
+    ///
+    /// # What it must not reach
+    ///
+    /// The outbound sequence counter. That mark is not history: it records
+    /// what this identity has *issued*, and peers still online are holding it.
+    /// A clear that reset it would have every later message classified a
+    /// duplicate by those peers — this peer going mute while its own screen
+    /// looks perfectly healthy (D12). A conversation reopened after a clear
+    /// rehydrates from the counter and picks up exactly where it left off,
+    /// which is the behaviour, not an accident of one.
+    ///
+    /// Clearing an empty log is `Ok(0)`, not an error: having nothing to
+    /// forget is not a failure to forget.
+    fn clear(&self) -> Result<usize, MessageLogError>;
 }
 
 /// Typed failure of a [`MessageLogPort`] operation.

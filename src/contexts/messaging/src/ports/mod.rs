@@ -15,9 +15,11 @@
 //!
 //! **Inbound** (driving) ports are how this context is called:
 //! [`SendMessagePort`] for composing, [`InboundEnvelopePort`] for everything
-//! the network reports about messages, [`MessagingQueryPort`] for reads, and
+//! the network reports about messages, [`MessagingQueryPort`] for reads,
 //! [`PeerLifecyclePort`] for the peer-connected/disconnected news the
-//! composition root fans in from `membership` (D10). Their arguments are
+//! composition root fans in from `membership` (D10), and [`ClearHistoryPort`]
+//! for the one deliberate decision a person makes about this context's own
+//! state — throwing its conversations away. Their arguments are
 //! `domain` and `shared_types` types rather than the application's command
 //! DTOs — a port may not name an application type, so the imperative commands
 //! live in `application/commands/` and the services implementing these traits
@@ -57,6 +59,10 @@
 mod author_policy_port;
 #[cfg(test)]
 mod author_policy_port_test;
+mod clear_history_port;
+mod cleared_history;
+#[cfg(test)]
+mod cleared_history_test;
 mod clock_port;
 #[cfg(test)]
 mod clock_port_test;
@@ -99,6 +105,8 @@ mod verified_author;
 mod verified_author_test;
 
 pub use author_policy_port::AuthorPolicyPort;
+pub use clear_history_port::ClearHistoryPort;
+pub use cleared_history::ClearedHistory;
 pub use clock_port::ClockPort;
 pub use envelope_signer_port::{EnvelopeSignerError, EnvelopeSignerPort};
 pub use envelope_verifier_port::{EnvelopeVerifierError, EnvelopeVerifierPort};

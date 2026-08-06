@@ -1,25 +1,27 @@
 use std::sync::Arc;
 
 use crate::application::commands::{
-    InboundEnvelopeService, OutboundComposer, PeerLifecycleService, SendMessageService,
+    ClearHistoryService, InboundEnvelopeService, OutboundComposer, PeerLifecycleService,
+    SendMessageService,
 };
 use crate::application::queries::MessagingQueryService;
 use crate::application::{
     ConversationRegistry, MessageRecorder, MessagingPorts, MessagingSettings,
 };
 
-/// The assembled `messaging` context: its four inbound ports, wired over the
+/// The assembled `messaging` context: its five inbound ports, wired over the
 /// outbound ports a composition root supplies.
 ///
-/// # Why all four are built together
+/// # Why all five are built together
 ///
 /// CQRS separates the command and query *paths*, not the state they describe.
-/// The three command services and the query service must see one
+/// The four command services and the query service must see one
 /// [`ConversationRegistry`], or a message just accepted from the network would
 /// be invisible in the pane rendering that conversation — a defect that
 /// surfaces only at runtime, as a message that never appears. Constructing them
 /// here makes that mistake unrepresentable at the root: there is no way to hand
-/// them different registries.
+/// them different registries. A clear is the sharpest case: one performed
+/// against a second registry would empty a screen nobody was looking at.
 ///
 /// # What OP-12 wires
 ///
@@ -47,11 +49,12 @@ pub struct MessagingContext {
     send: SendMessageService,
     inbound: InboundEnvelopeService,
     lifecycle: PeerLifecycleService,
+    history: ClearHistoryService,
     queries: MessagingQueryService,
 }
 
 impl MessagingContext {
-    /// Assembles all four inbound ports over the given outbound ports.
+    /// Assembles all five inbound ports over the given outbound ports.
     pub fn new(settings: MessagingSettings, ports: MessagingPorts) -> Self {
         let registry = Arc::new(ConversationRegistry::for_local_peer(
             settings.local_peer,
@@ -85,6 +88,7 @@ impl MessagingContext {
                 recorder.clone(),
             ),
             lifecycle: PeerLifecycleService::new(Arc::clone(&registry), recorder),
+            history: ClearHistoryService::new(Arc::clone(&registry), Arc::clone(&ports.log)),
             queries: MessagingQueryService::new(registry, ports.log),
         }
     }
@@ -105,13 +109,19 @@ impl MessagingContext {
         &self.lifecycle
     }
 
+    /// The inbound port for the one deliberate decision a person makes about
+    /// this context's own state: throwing its history away.
+    pub const fn history(&self) -> &ClearHistoryService {
+        &self.history
+    }
+
     /// The inbound port for reads. Nothing behind it writes.
     pub const fn queries(&self) -> &MessagingQueryService {
         &self.queries
     }
 
     /// Splits the context so a root can hand each side to a different owner —
-    /// the network pump, the UI task, the gap ticker — while all four keep the
+    /// the network pump, the UI task, the gap ticker — while all five keep the
     /// shared registry this constructor established.
     pub fn into_parts(
         self,
@@ -119,8 +129,15 @@ impl MessagingContext {
         SendMessageService,
         InboundEnvelopeService,
         PeerLifecycleService,
+        ClearHistoryService,
         MessagingQueryService,
     ) {
-        (self.send, self.inbound, self.lifecycle, self.queries)
+        (
+            self.send,
+            self.inbound,
+            self.lifecycle,
+            self.history,
+            self.queries,
+        )
     }
 }

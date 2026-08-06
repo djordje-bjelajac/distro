@@ -199,6 +199,13 @@ impl MessageLogPort for InMemoryMessageLog {
     fn conversations(&self) -> Result<Vec<ConversationId>, MessageLogError> {
         Ok(guard(&self.entries).keys().copied().collect())
     }
+
+    fn clear(&self) -> Result<usize, MessageLogError> {
+        let mut entries = guard(&self.entries);
+        let dropped = entries.values().map(Vec::len).sum();
+        entries.clear();
+        Ok(dropped)
+    }
 }
 
 /// A log that cannot be reached at all.
@@ -214,6 +221,10 @@ impl MessageLogPort for UnavailableMessageLog {
     }
 
     fn conversations(&self) -> Result<Vec<ConversationId>, MessageLogError> {
+        Err(MessageLogError::Unavailable)
+    }
+
+    fn clear(&self) -> Result<usize, MessageLogError> {
         Err(MessageLogError::Unavailable)
     }
 }
