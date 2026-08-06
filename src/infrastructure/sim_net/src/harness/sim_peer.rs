@@ -14,7 +14,7 @@ use membership::ports::{
     ClockPort as MembershipClockPort, DiscoveredPeer, DiscoveryOutcome,
     EventPublisherError as MembershipPublisherError, EventPublisherPort as MembershipPublisherPort,
     InboundSessionPort, JoinNetworkPort, JoinOutcome, KnownPeerView, LeaveOutcome,
-    MembershipCommandError, MembershipQueryPort, PeerCachePort, PeerDiscoveryPort,
+    MembershipCommandError, MembershipQueryPort, NetworkView, PeerCachePort, PeerDiscoveryPort,
     PeerTransportPort,
 };
 use messaging::application::{MessagingContext, MessagingPorts, MessagingSettings};
@@ -315,6 +315,19 @@ impl SimPeer {
     /// Reports evidence of life from `peer` (invariant 7).
     pub fn peer_heartbeat(&self, peer: PeerId) -> Result<(), MembershipCommandError> {
         self.membership.sessions().peer_heartbeat(peer)
+    }
+
+    /// The status line and the roster rows as one snapshot, taken at one
+    /// instant through one classification (canvas `0010` D5).
+    ///
+    /// What a screen showing both should call, and therefore what a scenario
+    /// asserting on both should call: assembling the two from
+    /// [`network_status`](Self::network_status) and
+    /// [`known_peers`](Self::known_peers) would let a test pass while the two
+    /// readings contradicted each other, which is the defect the query exists
+    /// to make unrepresentable.
+    pub fn network_view(&self) -> NetworkView {
+        self.membership.queries().network_view()
     }
 
     /// Every peer this instance knows about, in `PeerId` order, with presence

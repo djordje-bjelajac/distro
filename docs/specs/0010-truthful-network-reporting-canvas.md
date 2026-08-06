@@ -1,6 +1,6 @@
 # REASONS Canvas — Truthful Network Reporting
 
-**Status:** approved for execution 2026-08-06. Subordinate to `AGENTS.md` and to the system canvas `0002`, which this one **does** amend (§2.2, §2.5, §3, §7 — listed in §7/S8 below).
+**Status:** **IMPLEMENTED 2026-08-06.** All eight operations complete; workspace 1534 tests, all four gates clean. System canvas `0002` amended per S8 (invariant 7 rewritten with the evidence list and third-party prohibition, new invariant 7b, `Presence` gains `Unknown`, `PeerStanding` added, D13 for direct heartbeats, S6 gains the roster cap and the cache-evidence rule). **S7 stands: the original composite three-instance failure is not reproducible in CI** — `infra-sim-net` has no gossip mesh and no mDNS — so these tests prove the pieces and re-verification of the real screen is manual. Subordinate to `AGENTS.md` and to the system canvas `0002`, which this one **does** amend (§2.2, §2.5, §3, §7 — listed in §7/S8 below).
 **Input:** `docs/specs/0009-truthful-network-reporting-analysis.md` plus a binding system-architect ruling that corrected two of the analysis's own conclusions and found a violation the analysis missed.
 **Origin:** five defects observed in live three-instance use (one home server, two laptop sessions, same LAN), evidenced by two screenshots and traced to code.
 
