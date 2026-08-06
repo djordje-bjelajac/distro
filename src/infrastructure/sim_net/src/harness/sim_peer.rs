@@ -13,9 +13,9 @@ use membership::domain::{Endpoint, JoinTicket, NetworkStatus, SessionOutcome};
 use membership::ports::{
     ClockPort as MembershipClockPort, DiscoveredPeer, DiscoveryOutcome,
     EventPublisherError as MembershipPublisherError, EventPublisherPort as MembershipPublisherPort,
-    InboundSessionPort, JoinNetworkPort, JoinOutcome, KnownPeerView, LeaveOutcome,
-    MembershipCommandError, MembershipQueryPort, NetworkView, PeerCachePort, PeerDiscoveryPort,
-    PeerTransportPort,
+    ForgetPeersError, ForgetPeersOutcome, InboundSessionPort, JoinNetworkPort, JoinOutcome,
+    KnownPeerView, LeaveOutcome, MembershipCommandError, MembershipQueryPort, NetworkView,
+    PeerCachePort, PeerDiscoveryPort, PeerTransportPort,
 };
 use messaging::application::{MessagingContext, MessagingPorts, MessagingSettings};
 use messaging::domain::events::{MessageDeliveryStateChanged, MessageGapClosed};
@@ -23,10 +23,11 @@ use messaging::domain::{
     ConversationId, DeliveryFailure, DeliveryState, Message, MessageBody, MessageId,
 };
 use messaging::ports::{
-    AuthorPolicyPort, ClockPort as MessagingClockPort, EnvelopeSignerPort, EnvelopeVerifierPort,
-    EventPublisherPort as MessagingPublisherPort, InboundEnvelopePort, InboundVerdict,
-    MessageLogPort, MessageTransportPort, MessagingCommandError, MessagingQueryPort,
-    PeerLifecyclePort, SendMessagePort, SendOutcome, SequenceCounterPort,
+    AuthorPolicyPort, ClearHistoryPort, ClearedHistory, ClockPort as MessagingClockPort,
+    EnvelopeSignerPort, EnvelopeVerifierPort, EventPublisherPort as MessagingPublisherPort,
+    InboundEnvelopePort, InboundVerdict, MessageLogError, MessageLogPort, MessageTransportPort,
+    MessagingCommandError, MessagingQueryPort, PeerLifecyclePort, SendMessagePort, SendOutcome,
+    SequenceCounterPort,
 };
 use shared_types::{Envelope, PeerConnected, PeerDisconnected, PeerId};
 
@@ -272,6 +273,18 @@ impl SimPeer {
     /// Dials a peer this instance already knows — the UI's "connect" action.
     pub fn connect_to(&self, peer: PeerId) -> Result<SessionOutcome, MembershipCommandError> {
         self.membership.join().connect_to_peer(peer)
+    }
+
+    /// Leaves, then forgets every known peer and empties the cache, so the
+    /// next start is a cold one (canvas `0013`).
+    pub fn forget_peers(&self) -> Result<ForgetPeersOutcome, ForgetPeersError> {
+        self.membership.join().forget_known_peers()
+    }
+
+    /// Throws away every conversation this instance holds, keeping its
+    /// identity and its outbound sequence marks (canvas `0013`).
+    pub fn clear_history(&self) -> Result<ClearedHistory, MessageLogError> {
+        self.messaging.history().clear_history()
     }
 
     /// Re-derives every peer's presence against the clock and announces those
