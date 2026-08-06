@@ -141,3 +141,120 @@ fn every_documented_key_is_actually_bound() {
         assert!(!description.is_empty());
     }
 }
+
+// -------------------------------------------------- copying and confirming
+
+fn ticket_overlay() -> Overlay {
+    Overlay::Ticket("distro-join-1.abc".to_owned())
+}
+
+#[test]
+fn y_copies_only_when_there_is_a_ticket_on_screen() {
+    assert_eq!(
+        KeyBindings::action(character('y'), Mode::Browsing, &ticket_overlay()),
+        UiAction::CopyTicket
+    );
+    // With no ticket up there is nothing to copy, and a copy of nothing
+    // reported as a success is the same lie in a smaller font.
+    assert_eq!(browsing(character('y')), UiAction::Ignored);
+    assert_eq!(
+        KeyBindings::action(character('y'), Mode::Browsing, &Overlay::Diagnostics),
+        UiAction::Ignored
+    );
+}
+
+#[test]
+fn the_two_destructive_actions_only_open_a_question() {
+    assert_eq!(
+        browsing(character('F')),
+        UiAction::ConfirmForgetPeers,
+        "F asks; it does not forget"
+    );
+    assert_eq!(
+        browsing(character('H')),
+        UiAction::ConfirmClearHistory,
+        "H asks; it does not clear"
+    );
+}
+
+/// AC A9. There is no single keystroke anywhere in this map that destroys
+/// state — the destructive actions are reachable only through a question, and
+/// the question is answered by a key that does nothing destructive on its own.
+#[test]
+fn no_single_keystroke_destroys_anything() {
+    let destructive = [UiAction::Confirm];
+
+    for code in (b'a'..=b'z').chain(b'A'..=b'Z').map(char::from) {
+        let action = browsing(character(code));
+        assert!(
+            !destructive.contains(&action),
+            "{code} destroys state from the browsing map with no question asked"
+        );
+    }
+}
+
+#[test]
+fn a_confirmation_is_answered_by_y_or_enter_and_declined_by_everything_else() {
+    let asking = Overlay::ConfirmForgetPeers { peers: 3 };
+
+    assert_eq!(
+        KeyBindings::action(character('y'), Mode::Browsing, &asking),
+        UiAction::Confirm
+    );
+    assert_eq!(
+        KeyBindings::action(character('Y'), Mode::Browsing, &asking),
+        UiAction::Confirm
+    );
+    assert_eq!(
+        KeyBindings::action(key(KeyCode::Enter), Mode::Browsing, &asking),
+        UiAction::Confirm
+    );
+}
+
+/// The asymmetry that makes the confirmation worth having: every ordinary key
+/// stops meaning what it usually means, so a user reaching for the wrong
+/// letter cancels instead of connecting, quitting, or destroying something.
+#[test]
+fn while_confirming_every_other_key_cancels_including_the_dangerous_ones() {
+    let asking = Overlay::ConfirmClearHistory { messages: 12 };
+
+    for code in ['q', 'c', 'F', 'H', 'n', 'l', 'r', 'z'] {
+        assert_eq!(
+            KeyBindings::action(character(code), Mode::Browsing, &asking),
+            UiAction::Cancel,
+            "{code} must decline rather than do its usual job"
+        );
+    }
+    assert_eq!(
+        KeyBindings::action(key(KeyCode::Esc), Mode::Browsing, &asking),
+        UiAction::Cancel
+    );
+}
+
+/// Interrupt still outranks a question. A confirmation a user cannot escape
+/// with Ctrl+C would be a terminal they cannot get out of.
+#[test]
+fn interrupt_still_quits_while_a_confirmation_is_open() {
+    let interrupt = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+
+    assert_eq!(
+        KeyBindings::action(
+            interrupt,
+            Mode::Browsing,
+            &Overlay::ConfirmForgetPeers { peers: 1 }
+        ),
+        UiAction::Quit
+    );
+}
+
+/// A confirmation opened while a message was half-typed must not let the
+/// remaining keystrokes fall through into the input line.
+#[test]
+fn a_confirmation_outranks_the_typing_mode_behind_it() {
+    let asking = Overlay::ConfirmForgetPeers { peers: 1 };
+
+    assert_eq!(
+        KeyBindings::action(character('a'), Mode::Composing, &asking),
+        UiAction::Cancel
+    );
+}

@@ -6,7 +6,7 @@ use identity::ports::{IdentityCommandPort, IdentityQueryPort};
 use infra_net_libp2p::{JoinTicketCodec, JoinTicketCodecError};
 use membership::ports::MembershipQueryPort;
 use messaging::domain::{ConversationId, MessageBody};
-use messaging::ports::MessagingQueryPort;
+use messaging::ports::{ClearHistoryPort, MessagingQueryPort};
 use ratatui::DefaultTerminal;
 use ratatui::crossterm::event::{self, Event};
 use shared_types::PeerId;
@@ -15,8 +15,8 @@ use crate::composition::Node;
 use crate::runtime::{EngineCommand, EngineHandle};
 use crate::tui::screen::{self, ScreenData};
 use crate::tui::{
-    ConversationEntry, ConversationView, KeyBindings, Mode, NetworkPanes, Overlay, PeerLabels,
-    StatusLine, UiAction, UiState,
+    ClipboardPort, ConversationEntry, ConversationView, KeyBindings, Mode, NetworkPanes, Overlay,
+    PeerLabels, StatusLine, TerminalClipboard, UiAction, UiState,
 };
 
 /// Runs the terminal interface until the user quits.
@@ -44,6 +44,9 @@ pub fn run(
 ) -> io::Result<()> {
     let mut state = UiState::new();
     let labels = PeerLabels::for_local(node.local_peer());
+    // The terminal is already owned here, and the clipboard is reached through
+    // it (canvas `0013`, D9) — no dependency, and it works over SSH.
+    let clipboard = TerminalClipboard;
 
     while !state.is_quitting() {
         let frame = Frame::gather(node, labels, &state);
@@ -65,6 +68,7 @@ pub fn run(
                 &mut state,
                 node,
                 engine,
+                &clipboard,
                 labels,
                 &frame.conversations,
             );
@@ -259,6 +263,7 @@ fn apply(
     state: &mut UiState,
     node: &Arc<Node>,
     engine: &EngineHandle,
+    clipboard: &dyn ClipboardPort,
     labels: PeerLabels,
     conversations: &[ConversationEntry],
 ) {
@@ -314,6 +319,96 @@ fn apply(
         UiAction::Leave => {
             engine.send(EngineCommand::Leave);
         }
+        UiAction::CopyTicket => copy_ticket(state, node, clipboard),
+        UiAction::ConfirmForgetPeers => {
+            let peers = node.membership().queries().known_peers().len();
+            state.show(Overlay::ConfirmForgetPeers { peers });
+        }
+        UiAction::ConfirmClearHistory => {
+            let messages = messages_held(node);
+            state.show(Overlay::ConfirmClearHistory { messages });
+        }
+        UiAction::Confirm => confirm(state, node, engine),
+    }
+}
+
+/// How many messages this process is holding, across every conversation.
+///
+/// Counted for the confirmation, so the question names what is at stake rather
+/// than asking about "the history" in the abstract.
+fn messages_held(node: &Arc<Node>) -> usize {
+    let queries = node.messaging().queries();
+    queries
+        .conversations()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|conversation| queries.history(conversation).len())
+        .sum()
+}
+
+/// Carries out whichever destructive action was being confirmed.
+///
+/// The overlay is both the question and the record of which question it was,
+/// so it is read and closed here rather than tracked in a second field that
+/// could disagree with what is on screen.
+fn confirm(state: &mut UiState, node: &Arc<Node>, engine: &EngineHandle) {
+    let overlay = state.overlay().clone();
+    state.close_overlay();
+
+    match overlay {
+        // Leaving the network is a blocking call into the transport, so it
+        // goes to the engine thread rather than freezing the screen that is
+        // meant to be reporting it.
+        Overlay::ConfirmForgetPeers { .. } => {
+            engine.send(EngineCommand::ForgetPeers);
+        }
+        Overlay::ConfirmClearHistory { .. } => clear_history(node),
+        _ => {}
+    }
+}
+
+/// Clears the conversation history on the interface thread.
+///
+/// It belongs here rather than on the engine: it takes one lock and empties
+/// two in-memory maps, so queueing it would cost a frame of latency and buy a
+/// second place for it to fail.
+fn clear_history(node: &Arc<Node>) {
+    match node.messaging().history().clear_history() {
+        Ok(cleared) if cleared.is_empty() => {
+            node.notices().info("there was no history to clear");
+        }
+        Ok(cleared) => node.notices().info(format!(
+            "cleared {} message(s) from {} conversation(s)",
+            cleared.messages_dropped, cleared.conversations_dropped
+        )),
+        Err(error) => node
+            .notices()
+            .warn(format!("the history could not be cleared: {error}")),
+    }
+}
+
+/// Offers the ticket on screen to the clipboard.
+///
+/// # The notice says what was attempted
+///
+/// OSC 52 defines no reply, so a terminal that has it disabled ignores the
+/// sequence in silence and this program cannot tell that apart from success.
+/// Saying "copied" would therefore be a claim on evidence that does not exist.
+/// The sentence names the mechanism instead, so a user whose clipboard stayed
+/// empty knows what to go and look at rather than assuming their terminal is
+/// broken.
+fn copy_ticket(state: &UiState, node: &Arc<Node>, clipboard: &dyn ClipboardPort) {
+    let Overlay::Ticket(ticket) = state.overlay() else {
+        return;
+    };
+
+    match clipboard.offer(ticket) {
+        Ok(()) => node
+            .notices()
+            .info("ticket sent to the terminal's clipboard — if nothing pastes, your terminal has OSC 52 turned off"),
+        Err(error) => node
+            .notices()
+            .warn(format!("the ticket could not be sent to the terminal: {error}")),
     }
 }
 

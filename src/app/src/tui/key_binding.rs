@@ -45,6 +45,14 @@ pub enum UiAction {
     Rejoin,
     /// Close every session and announce the departure.
     Leave,
+    /// Put the ticket on screen onto the clipboard (canvas `0013`).
+    CopyTicket,
+    /// Ask whether every cached peer should be forgotten.
+    ConfirmForgetPeers,
+    /// Ask whether the conversation history should be cleared.
+    ConfirmClearHistory,
+    /// Go through with whichever destructive action is being confirmed.
+    Confirm,
 }
 
 /// The key map.
@@ -56,7 +64,7 @@ impl KeyBindings {
     /// Held here rather than written out in the overlay so a binding cannot be
     /// changed without the help text changing with it — a help screen that
     /// lies is worse than none.
-    pub const HELP: [(&'static str, &'static str); 13] = [
+    pub const HELP: [(&'static str, &'static str); 16] = [
         ("Tab / ↓ / j", "next conversation"),
         ("Shift+Tab / ↑ / k", "previous conversation"),
         ("i / Enter", "write a message"),
@@ -67,8 +75,11 @@ impl KeyBindings {
         ("b", "block or unblock the selected peer"),
         ("f", "show full fingerprints"),
         ("g", "generate a join ticket to hand out"),
+        ("y", "copy the ticket on screen, or confirm what was asked"),
         ("p", "paste a join ticket and join with it"),
         ("r / l", "rejoin / leave the network"),
+        ("F", "forget every cached peer (asks first)"),
+        ("H", "clear the conversation history (asks first)"),
         ("d / ? / q", "diagnostics / help / quit"),
     ];
 
@@ -82,9 +93,30 @@ impl KeyBindings {
             return UiAction::Quit;
         }
 
+        // A confirmation takes every key, because the whole point of it is
+        // that the keys around it stop meaning what they usually mean.
+        if overlay.is_confirmation() {
+            return Self::confirming(key);
+        }
+
         match mode {
             Mode::Composing | Mode::RedeemingTicket => Self::typing(key),
             Mode::Browsing => Self::browsing(key, overlay),
+        }
+    }
+
+    /// While a destructive action is being confirmed, exactly two keys agree
+    /// and everything else declines.
+    ///
+    /// The asymmetry is the safety property: a mistyped confirmation cancels,
+    /// and there is no key that both means something ordinary elsewhere *and*
+    /// destroys state here. `q` cannot quit and `c` cannot connect until the
+    /// question has been answered — which is a small rudeness, and cheaper
+    /// than a peer cache erased by someone reaching for the wrong letter.
+    fn confirming(key: KeyEvent) -> UiAction {
+        match key.code {
+            KeyCode::Char('y' | 'Y') | KeyCode::Enter => UiAction::Confirm,
+            _ => UiAction::Cancel,
         }
     }
 
@@ -121,6 +153,12 @@ impl KeyBindings {
             KeyCode::BackTab | KeyCode::Up => UiAction::PreviousConversation,
             KeyCode::Enter => UiAction::Compose,
             KeyCode::Esc => UiAction::Cancel,
+            // Copying is decided here rather than in `command`, because it is
+            // the one key whose meaning depends on what is on screen: there is
+            // no ticket to copy unless the ticket overlay is open, and a `y`
+            // that reported a copy of nothing would be the same lie in a
+            // smaller font.
+            KeyCode::Char('y') if matches!(overlay, Overlay::Ticket(_)) => UiAction::CopyTicket,
             KeyCode::Char(character) => Self::command(character),
             _ => UiAction::Ignored,
         }
@@ -142,6 +180,14 @@ impl KeyBindings {
             'c' => UiAction::ConnectSelected,
             'r' => UiAction::Rejoin,
             'l' => UiAction::Leave,
+            // Uppercase for the two irreversible ones. Not decoration: it
+            // keeps them off the row of single letters that already do
+            // things, and `C` in particular is refused because `c` connects —
+            // a destructive action one shifted keystroke from an ordinary one
+            // is the mistake the confirmation exists to catch, and the binding
+            // should not manufacture it.
+            'F' => UiAction::ConfirmForgetPeers,
+            'H' => UiAction::ConfirmClearHistory,
             _ => UiAction::Ignored,
         }
     }

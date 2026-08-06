@@ -4,11 +4,17 @@ version.workspace = true
 edition.workspace = true
 publish.workspace = true
 
-# Every third-party dependency of this crate is declared here with a concrete
-# version rather than in `[workspace.dependencies]`. None of them is used by any
-# other crate — that is canvas D2's containment rule made structural: `libp2p`,
-# `tokio`, and `ciborium` stop at this boundary, and a workspace-level entry
-# would advertise them to crates that must never name them.
+# `libp2p`, `tokio` and `ciborium` are declared here with concrete versions
+# rather than in `[workspace.dependencies]`, and no other crate names them —
+# that is canvas D2's containment rule made structural, since a workspace-level
+# entry would advertise them to crates that must never name them.
+#
+# The rule is about those three, whose *types* must not cross the adapter
+# boundary. It was once phrased as "none of these dependencies is used by any
+# other crate", which stopped being true when `app` needed base64 for the OSC 52
+# clipboard payload (canvas `0013`, D11). base64 was never a containment
+# concern — no base64 type appears in a port — so it moved to the workspace
+# where one version serves both, and the rule is stated here as what it is.
 [dependencies]
 shared-types.workspace = true
 membership.workspace = true
@@ -63,7 +69,7 @@ ciborium = "0.2.2"
 
 # Copy-pasteable join-ticket text (D1). URL-safe alphabet so a ticket survives
 # a chat client, an email, and a double-click selection intact.
-base64 = "0.22.1"
+base64.workspace = true
 
 # AutoNAT v2 draws random nonces for its probes; the crate takes the RNG as a
 # parameter rather than reaching for one.

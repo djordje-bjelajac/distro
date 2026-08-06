@@ -17,6 +17,9 @@
 //! provides no order across authors, and the honest thing to draw is therefore
 //! not the chat window a user expects. See [`ConversationView`].
 
+mod clipboard;
+#[cfg(test)]
+mod clipboard_test;
 mod conversation_view;
 #[cfg(test)]
 mod conversation_view_test;
@@ -41,6 +44,7 @@ mod ui_state;
 #[cfg(test)]
 mod ui_state_test;
 
+pub use clipboard::{ClipboardPort, TerminalClipboard};
 pub use conversation_view::{AuthorRun, ConversationView, Entry, delivery_mark, delivery_text};
 pub use key_binding::{KeyBindings, UiAction};
 pub use network_panes::NetworkPanes;

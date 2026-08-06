@@ -221,6 +221,34 @@ pub enum Overlay {
     Ticket(String),
     /// The local diagnostic counters (AC6, AC14, AC15).
     Diagnostics,
+    /// About to forget every cached peer, carrying how many are at stake.
+    ///
+    /// The count is in the overlay rather than fetched at draw time because a
+    /// confirmation has to be about the state the user was looking at when
+    /// they asked. A roster that gained a peer between the question and the
+    /// answer must not silently change what the question meant.
+    ConfirmForgetPeers {
+        peers: usize,
+    },
+    /// About to clear the conversation history, carrying how much is at stake.
+    ConfirmClearHistory {
+        messages: usize,
+    },
+}
+
+impl Overlay {
+    /// Whether this overlay is asking a question that destroys something if
+    /// answered yes.
+    ///
+    /// The key map branches on this rather than on the individual variants, so
+    /// a third destructive confirmation added later cannot accidentally be
+    /// left out of the branch that makes ordinary keys stop working.
+    pub const fn is_confirmation(&self) -> bool {
+        matches!(
+            self,
+            Self::ConfirmForgetPeers { .. } | Self::ConfirmClearHistory { .. }
+        )
+    }
 }
 
 /// A conversation the interface can show: the broadcast channel, or a 1:1 with

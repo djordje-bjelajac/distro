@@ -29,6 +29,10 @@ infra-sim-net = { path = "src/infrastructure/sim_net" }
 ed25519-dalek = "2"
 getrandom = "0.2"
 sha2 = "0.10"
+# Two crates encode base64 now: `infra-net-libp2p` for the join-ticket string
+# and `app` for the OSC 52 clipboard payload that carries it. One version, so
+# a ticket cannot be encoded by one alphabet and decoded by another.
+base64 = "0.22.1"
 
 [workspace.lints.rust]
 

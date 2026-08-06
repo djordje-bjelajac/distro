@@ -241,3 +241,38 @@ fn with_no_known_peers_only_the_broadcast_channel_exists() {
 
     assert_eq!(entries.len(), 1);
 }
+
+// ------------------------------------------------------------ confirmations
+
+#[test]
+fn only_the_two_destructive_questions_count_as_confirmations() {
+    assert!(Overlay::ConfirmForgetPeers { peers: 3 }.is_confirmation());
+    assert!(Overlay::ConfirmClearHistory { messages: 12 }.is_confirmation());
+
+    assert!(!Overlay::None.is_confirmation());
+    assert!(!Overlay::Help.is_confirmation());
+    assert!(!Overlay::Fingerprints.is_confirmation());
+    assert!(!Overlay::Diagnostics.is_confirmation());
+    assert!(!Overlay::Ticket("distro-join-1.abc".to_owned()).is_confirmation());
+}
+
+/// The count travels with the question. A roster that changed between the
+/// asking and the answering must not silently change what was asked.
+#[test]
+fn a_confirmation_carries_the_count_it_was_opened_with() {
+    let mut state = UiState::new();
+
+    state.show(Overlay::ConfirmForgetPeers { peers: 7 });
+
+    assert_eq!(state.overlay(), &Overlay::ConfirmForgetPeers { peers: 7 });
+}
+
+#[test]
+fn cancelling_a_confirmation_closes_it_and_leaves_browsing_intact() {
+    let mut state = UiState::new();
+    state.show(Overlay::ConfirmClearHistory { messages: 4 });
+
+    assert!(state.close_overlay());
+    assert_eq!(state.overlay(), &Overlay::None);
+    assert_eq!(state.mode(), Mode::Browsing);
+}

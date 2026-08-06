@@ -30,5 +30,11 @@ infra-store-fs.workspace = true
 # versioned copies of one terminal library is a class of bug worth deleting.
 ratatui = "0.30"
 
+# The OSC 52 clipboard payload (canvas `0013`, D9/D11). Already compiled for
+# `infra-net-libp2p`, so this is one more edge in the graph rather than one more
+# crate — and hand-rolling an encoder for a string users paste between machines
+# would be a correctness risk bought with nothing.
+base64.workspace = true
+
 [lints]
 workspace = true

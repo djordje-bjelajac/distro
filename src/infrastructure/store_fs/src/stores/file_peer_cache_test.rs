@@ -142,6 +142,39 @@ fn an_emptied_cache_stays_empty() {
     assert_eq!(cache.load(), Ok(Vec::new()));
 }
 
+/// What forgetting every peer leaves behind, asserted as bytes.
+///
+/// The round-trip above proves the value comes back empty; this proves the
+/// *file* is empty, which is the thing a user who forgot their peers actually
+/// asked for. A format change that started writing a placeholder line, or that
+/// left the old peers in place and marked them somehow, would still pass a
+/// round-trip and would still hand the next launch a warm start nobody wanted.
+#[test]
+fn an_emptied_cache_holds_a_header_and_nothing_else() {
+    let dir = TestDir::new("cache-emptied-file");
+    let writer = cache(&dir);
+    writer
+        .save(&[cached(
+            alice(),
+            &[("/ip4/198.51.100.7/udp/1/quic-v1", Reachability::Direct)],
+            1,
+        )])
+        .expect("the save must land");
+
+    writer.save(&[]).expect("the save must land");
+
+    let contents = fs::read_to_string(dir.file(FilePeerCache::FILE_NAME)).expect("the file exists");
+    assert_eq!(
+        contents.lines().count(),
+        1,
+        "the schema header, and no peer line: {contents:?}"
+    );
+    assert!(!contents.contains(&hex_bytes::encode(alice().as_bytes())));
+    // And a fresh reader agrees — the emptiness survives the process that
+    // caused it, which is the whole point of writing it down.
+    assert_eq!(cache(&dir).load(), Ok(Vec::new()));
+}
+
 #[test]
 fn the_cache_survives_a_restart() {
     let dir = TestDir::new("cache-restart");

@@ -265,6 +265,7 @@ impl Engine {
         match command {
             EngineCommand::Join(ticket) => self.spawn_join(*ticket),
             EngineCommand::Leave => self.leave(),
+            EngineCommand::ForgetPeers => self.forget_peers(),
             EngineCommand::ConnectTo(peer) => self.connect_to(peer),
             EngineCommand::PublishBroadcast(body) => self.publish_broadcast(body),
             EngineCommand::SendDirect { to, body } => self.send_direct(to, body),
@@ -325,6 +326,34 @@ impl Engine {
                 .node
                 .notices()
                 .warn(format!("the departure could not be announced: {error}")),
+        }
+    }
+
+    /// Forgets every cached peer, and says exactly what happened.
+    ///
+    /// Three outcomes, three sentences, because they call for three different
+    /// things from the user. A clean forget is done. A forget whose cache
+    /// could not be written *worked for this run and will undo itself at the
+    /// next launch*, which the user can only act on if they are told. And a
+    /// refusal because a join is running is a "try again in a moment", not a
+    /// failure.
+    fn forget_peers(&self) {
+        match self.node.membership().join().forget_known_peers() {
+            Ok(outcome) => {
+                let peers = outcome.forgotten;
+                match outcome.cache_failure {
+                    None => self.node.notices().info(format!(
+                        "forgot {peers} cached peer(s) — the next launch will start cold"
+                    )),
+                    Some(error) => self.node.notices().warn(format!(
+                        "forgot {peers} cached peer(s), but the cache could not be                          written ({error}) — they will be back at the next launch"
+                    )),
+                }
+            }
+            Err(error) => self
+                .node
+                .notices()
+                .warn(format!("nothing was forgotten: {error}")),
         }
     }
 

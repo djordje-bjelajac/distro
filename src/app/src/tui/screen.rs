@@ -303,6 +303,28 @@ fn draw_overlay(frame: &mut Frame<'_>, state: &UiState, data: &ScreenData<'_>) {
             ticket_lines(ticket),
         ),
         Overlay::Diagnostics => ("local diagnostics", diagnostic_lines(data)),
+        Overlay::ConfirmForgetPeers { peers } => (
+            "forget every cached peer?",
+            confirm_lines(
+                &plural(*peers, "peer", "peers"),
+                &[
+                    "Every session closes and this instance leaves the network.",
+                    "The next launch starts cold: no cached peers to dial, so it                      falls back to the local network or a join ticket.",
+                    "Your identity, your verified and blocked peers, and your                      conversations are untouched.",
+                ],
+            ),
+        ),
+        Overlay::ConfirmClearHistory { messages } => (
+            "clear the conversation history?",
+            confirm_lines(
+                &plural(*messages, "message", "messages"),
+                &[
+                    "Everything on screen goes. It is not stored anywhere, so it                      cannot be recovered.",
+                    "Peers keep whatever they received; this clears your copy only.",
+                    "Your identity and your place in every conversation are kept,                      so peers already listening still hear you.",
+                ],
+            ),
+        ),
     };
 
     let area = centred(frame.area(), 80, 70);
@@ -376,9 +398,48 @@ fn fingerprint_lines(data: &ScreenData<'_>) -> Vec<Line<'static>> {
     lines
 }
 
+/// `n thing` or `n things`, so a confirmation never reads "1 peers".
+fn plural(count: usize, one: &str, many: &str) -> String {
+    let noun = if count == 1 { one } else { many };
+    format!("{count} {noun}")
+}
+
+/// The body of a destructive confirmation: what is at stake, what follows, and
+/// how to answer.
+///
+/// The consequences are spelled out rather than summarised because this is the
+/// last moment they can be. Both actions are irreversible, and a user who
+/// finds out afterwards what else went has no way back.
+fn confirm_lines(subject: &str, consequences: &[&str]) -> Vec<Line<'static>> {
+    let mut lines = vec![
+        Line::from(Span::styled(
+            format!("This will discard {subject}."),
+            Style::default().add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+    ];
+
+    for consequence in consequences {
+        lines.push(Line::from(format!("• {consequence}")));
+    }
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "y or Enter to go ahead — any other key cancels.",
+        Style::default().fg(Color::Yellow),
+    )));
+
+    lines
+}
+
 fn ticket_lines(ticket: &str) -> Vec<Line<'static>> {
     vec![
         Line::from(ticket.to_owned()),
+        Line::from(""),
+        Line::from(Span::styled(
+            "Press y to put it on the clipboard.",
+            Style::default().add_modifier(Modifier::BOLD),
+        )),
         Line::from(""),
         Line::from("Anyone who pastes this can reach this peer. It expires in 24 hours."),
         Line::from("Handing it over announces this peer's addresses to whoever receives it."),
