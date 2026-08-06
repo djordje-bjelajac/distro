@@ -62,7 +62,7 @@ Red-green-refactor. Co-locate `module_test.rs` beside `module.rs` and register i
 
 ## SPDD workflow
 
-Non-trivial work flows through the skills in `.agents/skills/`, invoked as `$spdd-analysis` in Codex and `/spdd-analysis` in Claude Code (`.claude/skills/` symlinks to the same `SKILL.md` files, so edit only the originals):
+Non-trivial work flows through the commands in `.claude/commands/`, invoked as `/spdd-analysis` in Claude Code. These are the single definition — the terse `.agents/skills/` copies were removed on 2026-08-06 because two definitions of the same five workflows could resolve differently depending on the tool. **Codex has no SPDD commands as a result**; `.codex/agents/` specialists, including `spdd-executor`, are unaffected.
 
 `spdd-analysis` (requirements → context, ownership, risks; no code) → `spdd-reasons-canvas` (→ a REASONS canvas: Requirements, Entities, Approach, Structure, Operations, Norms, Safeguards, Agents; saved under `docs/specs/` or `spdd/prompt/`) → `spdd-generate` (execute the canvas's ordered operations with TDD and full verification).
 

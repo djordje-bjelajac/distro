@@ -1,5 +1,6 @@
-# The Claude Code mirror of .codex/agents and .agents/skills is shared with the
-# team, so re-include it here — a global gitignore commonly excludes `.claude`.
+# `.claude/` holds the SPDD commands and the mirror of .codex/agents, both
+# shared with the team, so re-include it here — a global gitignore commonly
+# excludes `.claude`.
 !.claude/
 .claude/settings.local.json
 

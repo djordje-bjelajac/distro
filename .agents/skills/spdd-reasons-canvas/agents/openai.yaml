@@ -1,4 +1,0 @@
-interface:
-  display_name: "SPDD REASONS Canvas"
-  short_description: "Create an implementation-ready REASONS canvas"
-  default_prompt: "Use $spdd-reasons-canvas to turn this requirement into an implementation-ready canvas."

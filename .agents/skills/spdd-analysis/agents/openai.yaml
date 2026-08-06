@@ -1,4 +1,0 @@
-interface:
-  display_name: "SPDD Analysis"
-  short_description: "Analyze requirements against repository context"
-  default_prompt: "Use $spdd-analysis to analyze this requirement before implementation."

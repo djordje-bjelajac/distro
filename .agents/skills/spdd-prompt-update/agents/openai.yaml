@@ -1,4 +1,0 @@
-interface:
-  display_name: "SPDD Prompt Update"
-  short_description: "Update a REASONS canvas without losing intent"
-  default_prompt: "Use $spdd-prompt-update to apply these changes to the referenced canvas."
