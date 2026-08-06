@@ -1104,6 +1104,80 @@ fn removing_an_unknown_peer_is_a_typed_error() {
     );
 }
 
+#[test]
+fn forgetting_an_empty_roster_forgets_nothing_and_leaves_it_usable() {
+    let mut roster = PeerRoster::for_local_peer(test_peers::alice());
+
+    assert_eq!(roster.forget_all(), 0);
+    assert!(roster.is_empty());
+    assert_eq!(roster.local_peer(), test_peers::alice());
+}
+
+#[test]
+fn forgetting_reports_how_many_peers_there_were_and_leaves_none() {
+    let mut roster = roster_hearing_from(test_peers::bob());
+    roster
+        .record_discovery(
+            test_peers::carol(),
+            vec![endpoint("/ip4/198.51.100.9/udp/4001/quic-v1")],
+            T0,
+        )
+        .expect("discovery of another peer is legal");
+
+    assert_eq!(roster.forget_all(), 2);
+    assert_eq!(roster.len(), 0);
+    assert_eq!(roster.known_peers().count(), 0);
+    assert_eq!(roster.peer(&test_peers::bob()), None);
+}
+
+/// The local peer was never an entry (invariant 2), so forgetting cannot
+/// remove it — this roster is still `alice`'s afterwards, and still refuses a
+/// self-entry.
+#[test]
+fn forgetting_leaves_the_local_identity_and_its_self_entry_rule_intact() {
+    let mut roster = roster_hearing_from(test_peers::bob());
+
+    roster.forget_all();
+
+    assert_eq!(roster.local_peer(), test_peers::alice());
+    assert_eq!(
+        roster.record_discovery(
+            test_peers::alice(),
+            vec![endpoint("/ip4/198.51.100.7/udp/4001/quic-v1")],
+            T0,
+        ),
+        Err(PeerRosterError::SelfConnection)
+    );
+}
+
+/// A forgotten roster is a cold one: the peer can be discovered again from
+/// scratch, `Unknown` rather than carrying any presence it had before.
+#[test]
+fn a_forgotten_peer_can_be_discovered_again_as_if_it_were_new() {
+    let mut roster = roster_hearing_from(test_peers::bob());
+    roster.forget_all();
+
+    let discovered = roster
+        .record_discovery(
+            test_peers::bob(),
+            vec![endpoint("/ip4/198.51.100.7/udp/4001/quic-v1")],
+            later(5_000),
+        )
+        .expect("a forgotten peer is a new peer");
+
+    assert_eq!(
+        discovered,
+        Some(PeerDiscovered {
+            peer: test_peers::bob(),
+            at: later(5_000),
+        })
+    );
+    assert_eq!(
+        known(&roster, test_peers::bob()).presence(later(5_000), LivenessWindows::default()),
+        Presence::Unknown
+    );
+}
+
 // -------------------------------------------------------------------- status
 
 #[test]

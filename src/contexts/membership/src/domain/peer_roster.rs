@@ -328,6 +328,31 @@ impl PeerRoster {
         Ok(entry.is_connected().then_some(PeerDisconnected { peer }))
     }
 
+    /// Forgets every peer, and returns how many there were.
+    ///
+    /// # Why this announces nothing
+    ///
+    /// [`remove`](Self::remove) reports a `PeerDisconnected` for an entry that
+    /// held a session, because removing one is how that session ends. Here
+    /// there is nothing to announce, and that is a statement about the
+    /// *caller*, not about this method: the only supported way to reach it is
+    /// after every session has already been closed and every departure already
+    /// published (canvas `0013`, D1/D2). A roster emptied while sessions were
+    /// still live would leave the transport holding links this aggregate no
+    /// longer knows about, and the next inbound frame would recreate the entry
+    /// through [`record_discovery`](Self::record_discovery) — the peer the user
+    /// asked to forget, back within seconds.
+    ///
+    /// The aggregate cannot enforce that ordering, because closing a session
+    /// means calling a port and this layer calls none. So it is the
+    /// application's obligation, stated here where someone reaching for this
+    /// method will read it.
+    pub fn forget_all(&mut self) -> usize {
+        let forgotten = self.peers.len();
+        self.peers.clear();
+        forgotten
+    }
+
     /// Evicts until one more entry fits under [`MAX_PEERS`](Self::MAX_PEERS).
     ///
     /// The order is a domain rule, not an implementation detail (D9): the only
