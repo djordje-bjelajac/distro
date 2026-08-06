@@ -1,6 +1,7 @@
 # Target workspace layout
 
-**Status:** approved direction, not yet on disk. Recorded 2026-08-06.
+**Status:** approved target, not yet on disk. Recorded 2026-08-06.
+**Standing:** binding. Every change must move toward this layout or leave it untouched — never away from it. `AGENTS.md` and `CLAUDE.md` both carry the rule; a change that cannot align is a conflict to surface and amend this record for, not to route around.
 **Purpose:** the shape this workspace evolves toward as it grows a second, third and fourth composition root. Nothing here changes behaviour; it constrains where new code lands and records what each move costs.
 
 `AGENTS.md` still describes the layout **on disk today** and remains authoritative for current work. This file describes the destination. When a migration step lands, `AGENTS.md` and `CLAUDE.md` are updated in the same commit — never after.

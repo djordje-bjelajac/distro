@@ -6,7 +6,9 @@ This Rust Cargo workspace follows DDD, hexagonal architecture, CQRS, and TDD. Mo
 
 `src/app/` is the composition root: the single binary crate that wires every context to its adapters and hosts the terminal interface. It belongs to no context, so it sits beside them rather than inside one. It depends on everything and **nothing depends on it**; it holds no domain rule of its own, and it never links test infrastructure such as `src/infrastructure/sim_net/`.
 
-This section describes the layout **on disk today** and governs current work. `docs/architecture/target-workspace-layout.md` records the shape the workspace evolves toward — several composition roots under `src/apps/`, with `src/infrastructure/` named by capability rather than by technology. Consult it before adding a crate or a second binary; update both files in the commit that moves anything, never afterwards.
+This section describes the layout **on disk today**. `docs/architecture/target-workspace-layout.md` is the approved target — several composition roots under `src/apps/`, with `src/infrastructure/` named by capability rather than by technology — and **every change must move toward it or leave it untouched, never away from it**. Consult it before adding any crate, binary, or top-level directory.
+
+New code lands at its target path. Relocating existing code is separate work: its own commit, a pure move, gates green, with this file and `CLAUDE.md` updated in the same commit — never bundled with a feature. A change that cannot align is a conflict to surface and amend the record for, not to route around; refuse a shared `apps/common` crate in particular, since it would become a composition root everything depends on.
 
 Each context crate should use this layout:
 

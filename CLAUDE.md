@@ -30,7 +30,7 @@ Run the narrowest relevant check after each change; run all four before declarin
 
 Rust Cargo workspace applying DDD, hexagonal architecture, CQRS, and TDD. One bounded context per crate under `src/contexts/<context>/`, with shared contracts in `src/shared_types/`, technical implementations in `src/infrastructure/`, integration tests in `tests/integration/`, and decision records in `docs/`.
 
-The layout below is what is on disk. `docs/architecture/target-workspace-layout.md` records where it is heading — multiple composition roots under `src/apps/` (`tui`, `desktop`, the mobile bridges, `rendezvous`) and capability-named infrastructure. Read it before adding a crate; it also records why `apps/rendezvous/` is a reserved slot rather than a decision, since it contradicts canvas safeguard S1 as written.
+**`docs/architecture/target-workspace-layout.md` is the approved target layout, and every change must move toward it or leave it untouched — never away from it.** The layout in this section is what is on disk today; the target is multiple composition roots under `src/apps/` (`tui`, `desktop`, the mobile bridges, `rendezvous`) with `src/infrastructure/` named by capability rather than technology. Read it before adding any crate, binary, or top-level directory. It also records why `apps/rendezvous/` is a reserved slot rather than a decision: it contradicts canvas safeguard S1 as written.
 
 `src/app/` is the composition root — one binary crate wiring every context to its adapters, plus the terminal interface. It belongs to no context, depends on everything, and **nothing depends on it**. It contains no domain rule: if wiring something would require a rule that does not exist, that is a canvas gap to surface, not a decision to take in the root. It must never depend on `src/infrastructure/sim_net/`, which is test infrastructure.
 
@@ -51,6 +51,8 @@ Rules that are easy to violate and expensive to unwind:
 - **Contexts never import each other.** Communicate only through published contracts in `src/shared_types/` or domain events. A shared repository or table that couples two contexts is a design error, not a shortcut.
 - **Commands mutate, queries only read.** Keep the two paths separate all the way through the application layer.
 - **A missing port is a blocker, not a detour.** Do not reach past an absent port to a concrete adapter — propose a domain-oriented contract instead.
+- **New code lands at its target path, not its legacy one.** A new crate goes where `target-workspace-layout.md` says it belongs; a new composition root goes under `src/apps/` and never becomes a role flag on an existing binary; new infrastructure is named by capability. Relocating *existing* code is separate work — its own commit, a pure move, gates green, with `AGENTS.md` and this file updated in the same commit. Never bundle a move with a feature.
+- **A change that cannot align with the target is a conflict to surface, not to route around.** Say which entry it contradicts and why, and let the layout record be amended — the same rule that governs canvas safeguards. A shared `apps/common` crate is the specific shortcut to refuse: it would become a composition root everything depends on.
 
 Naming: ports carry a `Port` suffix, handlers are named by intent (`CreateOrderHandler`), commands are imperative, events are past tense. One principal implementation per file; `lib.rs`/`mod.rs` mostly re-export. No generic `utils.rs`.
 
